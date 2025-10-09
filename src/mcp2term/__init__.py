@@ -1,6 +1,7 @@
 """mcp2term package exposing MCP terminal server components."""
 
 from .config import ServerConfig
+from .ngrok import NgrokController, NgrokSettings, NgrokTunnel
 from .plugin import GlobalPluginManager, PluginManager, PluginRegistry
 from .server import create_server
 from .shell import ShellCommandExecutor
@@ -22,4 +23,7 @@ __all__ = [
     "PluginManager",
     "PluginRegistry",
     "GlobalPluginManager",
+    "NgrokController",
+    "NgrokSettings",
+    "NgrokTunnel",
 ]
