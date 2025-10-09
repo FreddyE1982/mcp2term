@@ -44,6 +44,8 @@ Change `--transport` to `sse` or `streamable-http` to use the corresponding MCP 
 
 While the server is running it mirrors every executed command, stdout chunk, and stderr chunk to the hosting console. Set `MCP2TERM_CONSOLE_ECHO=false` to suppress the mirroring when embedding the server into log-sensitive environments.
 
+When running with the `streamable-http` transport the MCP endpoint is served from the `/mcp` path (or `--mount-path` plus `/mcp` when a custom mount is provided). The CLI prints the fully qualified URL, including the `/mcp` suffix, to make tunnelling targets such as ngrok easy to copy.
+
 ## MCP tool
 
 The server registers a single tool:

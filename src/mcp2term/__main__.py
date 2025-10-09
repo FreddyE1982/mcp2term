@@ -12,6 +12,20 @@ from .server import create_server
 logger = logging.getLogger(__name__)
 
 
+def _resolve_http_path(path: str | None, fallback: str) -> str:
+    value = path or fallback
+    if not value.startswith("/"):
+        value = f"/{value}"
+    if value == "/":
+        return fallback
+    return value
+
+
+def _format_endpoint(base_url: str, path: str | None, fallback: str) -> str:
+    formatted_path = _resolve_http_path(path, fallback)
+    return f"{base_url.rstrip('/')}{formatted_path}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the mcp2term MCP server")
     parser.add_argument(
@@ -51,6 +65,13 @@ def main() -> None:
     GlobalPluginManager.register_export("mcp2term.ngrok.tunnel", None)
 
     ngrok_controller = None
+    if args.transport == "streamable-http":
+        http_endpoint = f"http://{server.settings.host}:{server.settings.port}"
+        logger.info(
+            "Streamable HTTP endpoint: %s",
+            _format_endpoint(http_endpoint, args.mount_path, server.settings.streamable_http_path),
+        )
+
     if config.ngrok.is_enabled_for(args.transport):
         from .ngrok import NgrokController
 
@@ -71,7 +92,10 @@ def main() -> None:
             raise
         else:
             GlobalPluginManager.register_export("mcp2term.ngrok.tunnel", tunnel)
-            logger.info("ngrok public URL: %s", tunnel.public_url)
+            public_url = tunnel.public_url
+            if args.transport == "streamable-http":
+                public_url = _format_endpoint(public_url, args.mount_path, server.settings.streamable_http_path)
+            logger.info("ngrok public URL: %s", public_url)
     else:
         if not config.ngrok.enabled:
             logger.info("ngrok tunneling disabled via configuration")

@@ -26,4 +26,4 @@ mcp2term-client --url https://your-ngrok-url.example/mcp
 ```
 
 Pass `--timeout` to set a default command timeout in seconds. The client requires an ngrok tunnel
-or another publicly reachable Streamable HTTP endpoint exposed by the `mcp2term` server.
+or another publicly reachable Streamable HTTP endpoint exposed by the `mcp2term` server. Supplying the base URL (for example `https://your-ngrok-url.example`) also works—the client automatically appends `/mcp` when no path is provided.

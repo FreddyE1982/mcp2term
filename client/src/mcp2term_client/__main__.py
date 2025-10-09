@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> None:
 
     state = RemoteShellState(cwd=initial_cwd)
     processor = RemoteCommandProcessor(session=session, state=state)
-    runner = XonshShellRunner(processor, url=args.url)
+    runner = XonshShellRunner(processor, url=session.endpoint_url)
 
     try:
         runner.run()

@@ -1,5 +1,7 @@
 """Tests for the MCP server factory and plugin exposure."""
 
+import asyncio
+
 import pytest
 
 from mcp2term.config import ServerConfig
@@ -7,11 +9,10 @@ from mcp2term.plugin import PluginManager
 from mcp2term.server import create_server
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_server_registers_run_command_tool(use_real_dependencies: bool) -> None:
+def test_server_registers_run_command_tool(use_real_dependencies: bool) -> None:
     server = create_server(config=ServerConfig())
-    tools = await server.list_tools()
+    tools = asyncio.run(server.list_tools())
     tool_names = {tool.name for tool in tools}
     assert "run_command" in tool_names
 

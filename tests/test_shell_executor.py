@@ -1,5 +1,7 @@
 """Tests for the shell command executor."""
 
+import asyncio
+
 import pytest
 
 from mcp2term.config import ServerConfig
@@ -8,9 +10,8 @@ from mcp2term.shell import CommandTimeoutError, ShellCommandExecutor
 from mcp2term.streaming import InMemoryStreamRecorder
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_shell_executor_streams_output(use_real_dependencies: bool) -> None:
+def test_shell_executor_streams_output(use_real_dependencies: bool) -> None:
     config = ServerConfig()
     manager = PluginManager()
     manager.refresh_exports()
@@ -18,7 +19,7 @@ async def test_shell_executor_streams_output(use_real_dependencies: bool) -> Non
     PluginRegistry(manager).register_command_listener(recorder)
     executor = ShellCommandExecutor(config, manager)
 
-    result = await executor.run("printf 'hello' && printf ' world\\n'")
+    result = asyncio.run(executor.run("printf 'hello' && printf ' world\\n'"))
 
     assert "hello world" in result.stdout
     assert recorder.start_event is not None
@@ -27,9 +28,8 @@ async def test_shell_executor_streams_output(use_real_dependencies: bool) -> Non
     assert stdout_chunks, "Expected stdout chunks to be recorded"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_shell_executor_timeout_records_completion(use_real_dependencies: bool) -> None:
+def test_shell_executor_timeout_records_completion(use_real_dependencies: bool) -> None:
     config = ServerConfig()
     manager = PluginManager()
     manager.refresh_exports()
@@ -37,8 +37,11 @@ async def test_shell_executor_timeout_records_completion(use_real_dependencies: 
     PluginRegistry(manager).register_command_listener(recorder)
     executor = ShellCommandExecutor(config, manager)
 
-    with pytest.raises(CommandTimeoutError) as excinfo:
+    async def invoke_timeout() -> None:
         await executor.run("python -c 'import time; time.sleep(1)'", timeout=0.1)
+
+    with pytest.raises(CommandTimeoutError) as excinfo:
+        asyncio.run(invoke_timeout())
 
     timeout_error = excinfo.value
     assert timeout_error.event is not None
@@ -47,15 +50,14 @@ async def test_shell_executor_timeout_records_completion(use_real_dependencies: 
     assert recorder.complete_event.return_code == timeout_error.event.return_code
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_console_echo_mirrors_stdout(use_real_dependencies: bool, capsys) -> None:
+def test_console_echo_mirrors_stdout(use_real_dependencies: bool, capsys) -> None:
     config = ServerConfig()
     manager = PluginManager()
     manager.refresh_exports()
     executor = ShellCommandExecutor(config, manager)
 
-    await executor.run("printf 'hello world\\n'")
+    asyncio.run(executor.run("printf 'hello world\\n'"))
 
     captured = capsys.readouterr()
     assert "▶ printf 'hello world\\n'" in captured.out
@@ -63,32 +65,30 @@ async def test_console_echo_mirrors_stdout(use_real_dependencies: bool, capsys) 
     assert "✔ exit code" in captured.out
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_console_echo_mirrors_stderr(use_real_dependencies: bool, capsys) -> None:
+def test_console_echo_mirrors_stderr(use_real_dependencies: bool, capsys) -> None:
     config = ServerConfig()
     manager = PluginManager()
     manager.refresh_exports()
     executor = ShellCommandExecutor(config, manager)
 
-    await executor.run(
-        "python -c \"import sys; sys.stderr.write('boom\\n')\""
+    asyncio.run(
+        executor.run("python -c \"import sys; sys.stderr.write('boom\\n')\"")
     )
 
     captured = capsys.readouterr()
     assert "boom" in captured.err
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-async def test_console_echo_can_be_disabled(use_real_dependencies: bool, capsys) -> None:
+def test_console_echo_can_be_disabled(use_real_dependencies: bool, capsys) -> None:
     config = ServerConfig()
     manager = PluginManager()
     manager.refresh_exports()
     manager.set_console_echo_enabled(False)
     executor = ShellCommandExecutor(config, manager)
 
-    await executor.run("printf 'quiet run\\n'")
+    asyncio.run(executor.run("printf 'quiet run\\n'"))
 
     captured = capsys.readouterr()
     assert captured.out == ""
