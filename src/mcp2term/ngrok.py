@@ -79,7 +79,7 @@ class NgrokSettings:
     region: str | None = None
     config_path: Path | None = None
     hostname: str | None = None
-    domain: str | None = None
+    domain: str | None = "alpaca-model-easily.ngrok-free.app"
     edge: str | None = None
     log_level: str = "info"
     transports: tuple[str, ...] = ("sse", "streamable-http")

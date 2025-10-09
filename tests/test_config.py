@@ -15,6 +15,7 @@ def test_ngrok_settings_defaults(use_real_dependencies: bool) -> None:
     assert config.ngrok.transports == ("sse", "streamable-http")
     assert config.ngrok.start_timeout > 0
     assert config.ngrok.poll_interval > 0
+    assert config.ngrok.domain == "alpaca-model-easily.ngrok-free.app"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
