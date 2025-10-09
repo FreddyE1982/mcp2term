@@ -118,6 +118,12 @@ class PluginManager:
             self.loaded_plugins[module_name] = plugin
             self.refresh_exports()
 
+    def register_export(self, qualified_name: str, value: Any) -> None:
+        """Register or update an export available to plugins."""
+
+        logger.debug("Registering export %s", qualified_name)
+        self.exports[qualified_name] = value
+
     def load_plugins(self, module_names: tuple[str, ...]) -> None:
         """Synchronously load plugins, running the event loop if needed."""
 

@@ -1,0 +1,147 @@
+"""Integration tests for the xonsh-based client."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+
+import pytest
+import anyio
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+from mcp2term_client.session import RemoteMcpSession
+from mcp2term_client.shell import RemoteCommandProcessor
+from mcp2term_client.state import RemoteShellState
+
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+SERVER_HOST = "127.0.0.1"
+
+
+@contextmanager
+def running_server() -> str:
+    import socket
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(os.path.join(ROOT, "src"))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((SERVER_HOST, 0))
+        port = sock.getsockname()[1]
+    script = (
+        "from mcp2term.config import ServerConfig\n"
+        "from mcp2term.server import create_server\n"
+        "config = ServerConfig.from_env()\n"
+        "server = create_server(config=config)\n"
+        f"server.settings.host = '{SERVER_HOST}'\n"
+        f"server.settings.port = {port}\n"
+        "server.run(transport='streamable-http', mount_path=None)\n"
+    )
+    command = [sys.executable, "-c", script]
+    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        server_url = f"http://{SERVER_HOST}:{port}/mcp"
+        _wait_for_server(server_url, process)
+        yield server_url
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _wait_for_server(url: str, process: subprocess.Popen[str], timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                "Server process exited prematurely:\n"
+                f"STDOUT: {stdout.decode().strip()}\n"
+                f"STDERR: {stderr.decode().strip()}"
+            )
+        try:
+            if _probe_server(url):
+                return
+        except Exception:
+            pass
+        time.sleep(0.2)
+    process.terminate()
+    stdout, stderr = process.communicate()
+    raise RuntimeError(
+        "Server did not become ready in time:\n"
+        f"STDOUT: {stdout.decode().strip()}\n"
+        f"STDERR: {stderr.decode().strip()}"
+    )
+
+
+def _probe_server(url: str) -> bool:
+    """Attempt to establish and initialize an MCP session."""
+
+    async def attempt() -> bool:
+        try:
+            async with streamablehttp_client(url, timeout=5.0, sse_read_timeout=5.0) as (
+                read_stream,
+                write_stream,
+                _,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+            return True
+        except Exception:
+            return False
+
+    return anyio.run(attempt)
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_executes_command(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            cwd = session.resolve_working_directory()
+            state = RemoteShellState(cwd=cwd)
+            response = session.run_command(
+                "echo integration",
+                working_directory=state.cwd,
+                environment=state.environment,
+            )
+        finally:
+            session.close()
+    assert "integration" in response.stdout
+    assert response.return_code == 0
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_processor_manages_state(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            state = RemoteShellState(cwd=session.resolve_working_directory())
+            statuses: list[int] = []
+            processor = RemoteCommandProcessor(session=session, state=state, status_callback=statuses.append)
+
+            assert processor.execute("pwd") == 0
+            assert statuses[-1] == 0
+
+            assert processor.execute("export TEST_VAR=friend") == 0
+            assert state.environment["TEST_VAR"] == "friend"
+
+            assert processor.execute("TEST_VAR=world echo $TEST_VAR") == 0
+            assert statuses[-1] == 0
+            assert state.environment["TEST_VAR"] == "friend"
+
+            assert processor.execute("unset TEST_VAR") == 0
+            assert "TEST_VAR" not in state.environment
+
+            assert processor.execute("cd /") == 0
+            assert state.cwd == "/"
+        finally:
+            session.close()

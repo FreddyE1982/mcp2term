@@ -28,10 +28,17 @@ class ServerConfig:
         """Create configuration from environment variables."""
 
         env = dict(os.environ if environ is None else environ)
-        shell_path = env.get("MCP2TERM_SHELL", cls.shell_path)
-        working_directory = Path(env.get("MCP2TERM_WORKDIR", os.getcwd())).expanduser().resolve()
-        inherit_environment = env.get("MCP2TERM_INHERIT_ENV", "true").lower() in {"1", "true", "yes", "on"}
-        additional_environment: MutableMapping[str, str] = {}
+        defaults = cls()
+
+        shell_path = env.get("MCP2TERM_SHELL", defaults.shell_path)
+        working_directory = Path(env.get("MCP2TERM_WORKDIR", defaults.working_directory)).expanduser().resolve()
+        inherit_raw = env.get("MCP2TERM_INHERIT_ENV")
+        inherit_environment = (
+            defaults.inherit_environment
+            if inherit_raw is None
+            else inherit_raw.lower() in {"1", "true", "yes", "on"}
+        )
+        additional_environment: MutableMapping[str, str] = dict(defaults.additional_environment)
         extra_env_raw = env.get("MCP2TERM_EXTRA_ENV")
         if extra_env_raw:
             try:
@@ -42,7 +49,11 @@ class ServerConfig:
                     additional_environment[str(key)] = str(value)
             except json.JSONDecodeError as exc:
                 raise ValueError("Invalid JSON for MCP2TERM_EXTRA_ENV") from exc
-        plugin_modules = tuple(filter(None, (module.strip() for module in env.get("MCP2TERM_PLUGINS", "").split(","))))
+        plugins_raw = env.get("MCP2TERM_PLUGINS")
+        if plugins_raw is None:
+            plugin_modules = defaults.plugin_modules
+        else:
+            plugin_modules = tuple(filter(None, (module.strip() for module in plugins_raw.split(","))))
         timeout_raw = env.get("MCP2TERM_COMMAND_TIMEOUT")
         timeout_value: float | None
         if timeout_raw:
@@ -53,7 +64,7 @@ class ServerConfig:
             except ValueError as exc:
                 raise ValueError("Invalid MCP2TERM_COMMAND_TIMEOUT value") from exc
         else:
-            timeout_value = None
+            timeout_value = defaults.command_timeout
         ngrok_settings = NgrokSettings()
         ngrok_enable_raw = env.get("MCP2TERM_NGROK_ENABLE")
         if ngrok_enable_raw is not None:

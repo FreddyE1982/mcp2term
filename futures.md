@@ -16,3 +16,7 @@
 ## Ngrok metrics streaming
 - **Purpose:** Emit ngrok tunnel statistics and connection diagnostics to clients and plugins.
 - **Usage:** Add a background task to `NgrokController` that polls the ngrok administrative API and forwards aggregated metrics through the plugin registry for observability dashboards.
+
+## Remote command cancellation
+- **Purpose:** Allow the client to send interrupts or termination signals to long-running remote commands.
+- **Usage:** Extend the MCP tool interface with a cancellation endpoint and expose a control shortcut in the xonsh client that forwards `SIGINT` to the remote process.
