@@ -116,6 +116,7 @@ def test_remote_session_executes_command(use_real_dependencies: bool) -> None:
             session.close()
     assert "integration" in response.stdout
     assert response.return_code == 0
+    assert response.command_id
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -165,3 +166,29 @@ def test_remote_session_normalizes_root_url(use_real_dependencies: bool) -> None
             session.close()
     assert "normalized" in response.stdout
     assert response.return_code == 0
+    assert response.command_id
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_can_cancel_command(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            cwd = session.resolve_working_directory()
+            command_id, future = session.run_command_async(
+                "python -c 'import time; time.sleep(5)'",
+                working_directory=cwd,
+                environment=None,
+            )
+            # Allow the command to start before sending the cancellation.
+            time.sleep(0.5)
+            cancel_response = session.cancel_command(command_id)
+            assert cancel_response.command_id == command_id
+            assert cancel_response.delivered
+            response = future.result(timeout=10.0)
+        finally:
+            session.close()
+
+    assert response.return_code != 0
+    assert response.command_id == command_id

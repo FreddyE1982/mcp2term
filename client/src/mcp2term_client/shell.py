@@ -23,6 +23,7 @@ class RemoteCommandProcessor:
     status_callback: Callable[[int], None] = field(default=lambda _status: None)
     output_writer: Callable[[str], None] = print
     error_writer: Callable[[str], None] = lambda message: print(message, file=sys.stderr)
+    current_command_id: str | None = field(default=None, init=False, repr=False)
 
     def execute(self, raw_command: str) -> int:
         command = raw_command.rstrip("\n")
@@ -64,17 +65,38 @@ class RemoteCommandProcessor:
 
     def _execute_remote_command(self, tokens: list[str], assignments: dict[str, str]) -> int:
         command_text = " ".join(shlex.quote(token) for token in tokens)
+        command_id, future = self.session.run_command_async(
+            command_text,
+            working_directory=self.state.cwd,
+            environment=self.state.environment,
+            ephemeral_environment=assignments,
+        )
+        self.current_command_id = command_id
+        response: "CommandResponse" | None = None
         try:
-            response = self.session.run_command(
-                command_text,
-                working_directory=self.state.cwd,
-                environment=self.state.environment,
-                ephemeral_environment=assignments,
-            )
-        except Exception as exc:
-            self.error_writer(str(exc))
-            self.status_callback(1)
-            return 1
+            while response is None:
+                try:
+                    response = future.result()
+                except KeyboardInterrupt:
+                    try:
+                        cancel_response = self.session.cancel_command(command_id)
+                    except Exception as cancel_exc:
+                        self.error_writer(f"cancel failed: {cancel_exc}")
+                        continue
+                    if cancel_response.delivered:
+                        signal_label = cancel_response.signal_name or str(cancel_response.signal)
+                        self.error_writer(
+                            f"Sent {signal_label} to remote command {command_id}."
+                        )
+                    else:
+                        self.error_writer("No running remote command to interrupt.")
+                except Exception as exc:
+                    self.error_writer(str(exc))
+                    self.status_callback(1)
+                    return 1
+        finally:
+            self.current_command_id = None
+        assert response is not None
 
         self.state.cwd = response.working_directory or self.state.cwd
         self.status_callback(response.return_code)

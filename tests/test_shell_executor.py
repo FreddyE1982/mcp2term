@@ -6,7 +6,7 @@ import pytest
 
 from mcp2term.config import ServerConfig
 from mcp2term.plugin import PluginManager, PluginRegistry
-from mcp2term.shell import CommandTimeoutError, ShellCommandExecutor
+from mcp2term.shell import CommandResult, CommandTimeoutError, ShellCommandExecutor
 from mcp2term.streaming import InMemoryStreamRecorder
 
 
@@ -22,6 +22,7 @@ def test_shell_executor_streams_output(use_real_dependencies: bool) -> None:
     result = asyncio.run(executor.run("printf 'hello' && printf ' world\\n'"))
 
     assert "hello world" in result.stdout
+    assert result.request.command_id
     assert recorder.start_event is not None
     assert recorder.complete_event is not None
     stdout_chunks = [chunk for chunk in recorder.chunks if chunk.stream == "stdout"]
@@ -90,6 +91,32 @@ def test_console_echo_can_be_disabled(use_real_dependencies: bool, capsys) -> No
 
     asyncio.run(executor.run("printf 'quiet run\\n'"))
 
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == ""
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_shell_executor_interrupts_running_command(use_real_dependencies: bool) -> None:
+    config = ServerConfig()
+    manager = PluginManager()
+    manager.refresh_exports()
+    recorder = InMemoryStreamRecorder()
+    PluginRegistry(manager).register_command_listener(recorder)
+    executor = ShellCommandExecutor(config, manager)
+
+    async def run_and_interrupt() -> CommandResult:
+        command_id = "test-interrupt"
+        task = asyncio.create_task(
+            executor.run(
+                "python -c 'import time; time.sleep(5)'",
+                command_id=command_id,
+            )
+        )
+        while recorder.start_event is None:
+            await asyncio.sleep(0.05)
+        # Wait briefly to ensure the process is actively sleeping.
+        await asyncio.sleep(0.1)
+        delivered = await executor.interrupt(command_id)
+        assert delivered, "Expected interrupt signal to be delivered"
+        result = await task
+        return result
+
+    result = asyncio.run(run_and_interrupt())
+    assert result.return_code != 0

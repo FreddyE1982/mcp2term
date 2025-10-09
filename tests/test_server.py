@@ -15,6 +15,7 @@ def test_server_registers_run_command_tool(use_real_dependencies: bool) -> None:
     tools = asyncio.run(server.list_tools())
     tool_names = {tool.name for tool in tools}
     assert "run_command" in tool_names
+    assert "cancel_command" in tool_names
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
