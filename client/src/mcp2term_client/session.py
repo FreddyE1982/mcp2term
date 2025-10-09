@@ -3,19 +3,23 @@ import json
 import queue
 import sys
 import threading
+import textwrap
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
+import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.exceptions import McpError
 
 from .backpressure import BackpressureMonitor, NoticeWriter
 
 _DEFAULT_STREAMABLE_HTTP_PATH = "/mcp"
+_DIAGNOSTIC_TIMEOUT = 5.0
 
 
 def _normalize_streamable_http_url(url: str) -> str:
@@ -196,6 +200,30 @@ class _Request:
     payload: dict[str, Any]
     future: Future[Any]
     track_backpressure: bool
+
+
+@dataclass(slots=True)
+class EndpointProbeResult:
+    """Represents the outcome of probing an HTTP endpoint."""
+
+    method: str
+    url: str
+    status_code: int | None
+    success: bool
+    detail: str | None
+
+    def summary(self) -> str:
+        if self.status_code is not None:
+            status_part = f"HTTP {self.status_code}"
+        else:
+            status_part = "connection failed"
+        if self.detail:
+            return f"{status_part} – {self.detail}"
+        return status_part
+
+
+class RemoteMcpSessionError(RuntimeError):
+    """Raised when the remote MCP session fails to start."""
 
 
 class RemoteMcpSession:
@@ -452,8 +480,15 @@ class RemoteMcpSession:
             read_stream, write_stream, _ = self._transport
             self._session = ClientSession(read_stream, write_stream, logging_callback=self._handle_log_message)
             await self._session.__aenter__()
-            await self._session.initialize()
-            self._startup_ready.set()
+            try:
+                await self._session.initialize()
+            except Exception as exc:
+                processed = await self._augment_startup_exception(exc)
+                self._startup_error = processed
+                self._startup_ready.set()
+                raise processed
+            else:
+                self._startup_ready.set()
 
             while True:
                 request = await queue_.get()
@@ -500,6 +535,11 @@ class RemoteMcpSession:
                 except Exception as exc:
                     request.future.set_exception(exc)
         except Exception as exc:
+            if not self._startup_ready.is_set():
+                processed = await self._augment_startup_exception(exc)
+                self._startup_error = processed
+                self._startup_ready.set()
+                raise processed
             self._startup_error = exc
             self._startup_ready.set()
             raise
@@ -596,3 +636,116 @@ class RemoteMcpSession:
         if not isinstance(data, str):
             data = json.dumps(data, ensure_ascii=False)
         self._log_streamer.submit(LogMessage(level=str(params.level), text=data))
+
+    async def _augment_startup_exception(self, exc: BaseException) -> BaseException:
+        if isinstance(exc, RemoteMcpSessionError):
+            return exc
+        should_probe = isinstance(exc, (httpx.HTTPError, McpError))
+        if isinstance(exc, McpError) and exc.error.message != "Session terminated":
+            should_probe = False
+        if not should_probe:
+            return exc
+        diagnostics: list[EndpointProbeResult] = []
+        try:
+            diagnostics = await self._collect_connection_diagnostics()
+        except Exception as probe_error:  # pragma: no cover - defensive
+            diagnostics = [
+                EndpointProbeResult(
+                    method="probe",
+                    url=self._url,
+                    status_code=None,
+                    success=False,
+                    detail=f"diagnostics failed: {probe_error}",
+                )
+            ]
+        message_lines = [
+            f"Unable to initialize MCP session against {self._url}",
+            f"Root cause: {exc}",
+        ]
+        if diagnostics:
+            message_lines.append("HTTP diagnostics:")
+            for result in diagnostics:
+                prefix = "  - "
+                status = result.summary()
+                message_lines.append(f"{prefix}{result.method} {result.url} -> {status}")
+        if any(result.status_code == 404 for result in diagnostics):
+            message_lines.append(
+                "Suggestion: confirm that the server is running and that the URL includes the correct Streamable HTTP mount "
+                "path (usually '/mcp')."
+            )
+        elif all(not result.success for result in diagnostics):
+            message_lines.append(
+                "Suggestion: verify network connectivity to the host and ensure any tunnels (such as ngrok) are active."
+            )
+        return RemoteMcpSessionError("\n".join(message_lines))
+
+    async def _collect_connection_diagnostics(self) -> list[EndpointProbeResult]:
+        candidates = list(self._candidate_probe_urls())
+        results: list[EndpointProbeResult] = []
+        for url in candidates:
+            result = await self._probe_endpoint(url)
+            results.append(result)
+        return results
+
+    def _candidate_probe_urls(self) -> Iterable[str]:
+        parsed = urlparse(self._url)
+        base = parsed._replace(path="", params="", query="", fragment="")
+        candidates: list[str] = [self._url]
+        if not self._url.endswith("/"):
+            candidates.append(self._url + "/")
+        candidates.append(urlunparse(base))
+        base_with_slash = urlunparse(base._replace(path="/"))
+        candidates.append(base_with_slash)
+        seen: set[str] = set()
+        for url in candidates:
+            if url in seen:
+                continue
+            seen.add(url)
+            yield url
+
+    async def _probe_endpoint(self, url: str) -> EndpointProbeResult:
+        async with httpx.AsyncClient(timeout=_DIAGNOSTIC_TIMEOUT, follow_redirects=True) as client:
+            try:
+                response = await client.post(
+                    url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": "mcp2term-client-diagnostic",
+                        "method": "mcp2term/diagnostic",
+                        "params": {},
+                    },
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+            except httpx.RequestError as error:
+                return EndpointProbeResult(
+                    method="POST",
+                    url=url,
+                    status_code=None,
+                    success=False,
+                    detail=str(error),
+                )
+        detail = self._summarize_response(response)
+        success = 200 <= response.status_code < 400
+        return EndpointProbeResult(
+            method="POST",
+            url=url,
+            status_code=response.status_code,
+            success=success,
+            detail=detail,
+        )
+
+    @staticmethod
+    def _summarize_response(response: httpx.Response) -> str | None:
+        content_type = response.headers.get("Content-Type", "").lower()
+        snippet: str | None = None
+        try:
+            if "application/json" in content_type:
+                data = response.json()
+                snippet = json.dumps(data, ensure_ascii=False)
+            else:
+                snippet = response.text
+        except Exception:  # pragma: no cover - defensive fallback
+            snippet = response.text
+        if snippet is None:
+            return None
+        return textwrap.shorten(snippet.replace("\n", " ").strip(), width=160, placeholder="…")
