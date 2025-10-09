@@ -10,6 +10,7 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 - **Automatic ngrok tunneling** so HTTP transports are reachable without additional manual setup.
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
 - **Structured tool responses** including timing information to make results easy for agents to consume.
+- **Console mirroring** so operators always see the command stream, stdout, and stderr on the hosting terminal by default.
 
 ## Installation
 
@@ -31,6 +32,7 @@ The project targets Python 3.12 or newer.
 | `MCP2TERM_EXTRA_ENV` | JSON object merged into the command environment. | `{}` |
 | `MCP2TERM_PLUGINS` | Comma-separated dotted module paths to load as plugins. | *(none)* |
 | `MCP2TERM_COMMAND_TIMEOUT` | Default timeout in seconds for commands. | unlimited |
+| `MCP2TERM_CONSOLE_ECHO` | Mirror commands and output to the server console (`true`/`false`). | `true` |
 
 ## Running the server
 
@@ -39,6 +41,8 @@ mcp2term --transport stdio
 ```
 
 Change `--transport` to `sse` or `streamable-http` to use the corresponding MCP transports. `--log-level` controls verbosity and `--mount-path` overrides the HTTP mount location when relevant.
+
+While the server is running it mirrors every executed command, stdout chunk, and stderr chunk to the hosting console. Set `MCP2TERM_CONSOLE_ECHO=false` to suppress the mirroring when embedding the server into log-sensitive environments.
 
 ## MCP tool
 

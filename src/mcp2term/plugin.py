@@ -9,7 +9,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Awaitable, Mapping, MutableMapping, Protocol, runtime_checkable
+from typing import Any, Awaitable, Mapping, MutableMapping, Protocol, TextIO, runtime_checkable
 
 from .streaming import (
     CommandCompleteEvent,
@@ -41,6 +41,50 @@ class PluginProtocol(Protocol):
     version: str
 
     def activate(self, registry: "PluginRegistry") -> Awaitable[None] | None: ...
+
+
+class ConsoleEchoListener(CommandStreamListener):
+    """Listener that mirrors command activity to the local console."""
+
+    def __init__(
+        self,
+        *,
+        stdout: TextIO | None = None,
+        stderr: TextIO | None = None,
+        prefix: str = "[mcp2term]",
+    ) -> None:
+        self._stdout = stdout or sys.stdout
+        self._stderr = stderr or sys.stderr
+        self._prefix = prefix
+
+    def _write_line(self, stream: TextIO, message: str) -> None:
+        stream.write(f"{self._prefix} {message}\n")
+        stream.flush()
+
+    async def on_command_start(self, event: CommandStartEvent) -> None:
+        self._write_line(self._stdout, f"▶ {event.request.command}")
+        self._write_line(
+            self._stdout,
+            f"  cwd: {event.request.working_directory}",
+        )
+
+    async def on_command_stdout(self, event: CommandOutputChunk) -> None:
+        if not event.data:
+            return
+        self._stdout.write(event.data)
+        self._stdout.flush()
+
+    async def on_command_stderr(self, event: CommandOutputChunk) -> None:
+        if not event.data:
+            return
+        self._stderr.write(event.data)
+        self._stderr.flush()
+
+    async def on_command_complete(self, event: CommandCompleteEvent) -> None:
+        self._write_line(
+            self._stdout,
+            f"✔ exit code {event.return_code} ({event.duration:.3f}s)",
+        )
 
 
 @dataclass(slots=True)
@@ -76,6 +120,37 @@ class PluginManager:
     exports: MutableMapping[str, Any] = field(default_factory=dict)
     command_listeners: list[CommandStreamListener] = field(default_factory=list)
     loaded_plugins: dict[str, PluginProtocol] = field(default_factory=dict)
+    _console_echo_listener: ConsoleEchoListener | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        self._ensure_console_echo_listener()
+
+    def _ensure_console_echo_listener(self) -> None:
+        if self._console_echo_listener is not None:
+            return
+        listener = ConsoleEchoListener()
+        self.command_listeners.append(listener)
+        self._console_echo_listener = listener
+
+    def set_console_echo_enabled(self, enabled: bool) -> None:
+        """Enable or disable mirroring command activity to the local console."""
+
+        if enabled:
+            if self._console_echo_listener is None:
+                listener = ConsoleEchoListener()
+                self.command_listeners.append(listener)
+                self._console_echo_listener = listener
+            return
+
+        if self._console_echo_listener is None:
+            return
+        try:
+            self.command_listeners.remove(self._console_echo_listener)
+        except ValueError:  # pragma: no cover - defensive guard
+            pass
+        self._console_echo_listener = None
 
     def refresh_exports(self) -> None:
         """Refresh exported symbols from loaded mcp2term modules."""

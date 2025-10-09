@@ -21,6 +21,7 @@ class ServerConfig:
     additional_environment: MutableMapping[str, str] = field(default_factory=dict)
     plugin_modules: tuple[str, ...] = ()
     command_timeout: float | None = None
+    console_echo: bool = True
     ngrok: NgrokSettings = field(default_factory=NgrokSettings)
 
     @classmethod
@@ -65,6 +66,17 @@ class ServerConfig:
                 raise ValueError("Invalid MCP2TERM_COMMAND_TIMEOUT value") from exc
         else:
             timeout_value = defaults.command_timeout
+        console_echo_raw = env.get("MCP2TERM_CONSOLE_ECHO")
+        if console_echo_raw is None:
+            console_echo_enabled = defaults.console_echo
+        else:
+            normalized_console = console_echo_raw.lower()
+            if normalized_console in {"1", "true", "yes", "on"}:
+                console_echo_enabled = True
+            elif normalized_console in {"0", "false", "no", "off"}:
+                console_echo_enabled = False
+            else:
+                raise ValueError("MCP2TERM_CONSOLE_ECHO must be a boolean value")
         ngrok_settings = NgrokSettings()
         ngrok_enable_raw = env.get("MCP2TERM_NGROK_ENABLE")
         if ngrok_enable_raw is not None:
@@ -166,6 +178,7 @@ class ServerConfig:
             additional_environment=additional_environment,
             plugin_modules=plugin_modules,
             command_timeout=timeout_value,
+            console_echo=console_echo_enabled,
             ngrok=ngrok_settings,
         )
 
