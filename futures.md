@@ -11,3 +11,8 @@
 ## Plugin discovery via entry points
 - **Purpose:** Simplify plugin distribution by allowing packages to register under a common entry point group.
 - **Usage:** Extend `PluginManager` to load entry points such as `mcp2term.plugins`, merging them with `MCP2TERM_PLUGINS` configuration.
+
+
+## Ngrok metrics streaming
+- **Purpose:** Emit ngrok tunnel statistics and connection diagnostics to clients and plugins.
+- **Usage:** Add a background task to `NgrokController` that polls the ngrok administrative API and forwards aggregated metrics through the plugin registry for observability dashboards.

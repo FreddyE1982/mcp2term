@@ -7,6 +7,7 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 - **Full command execution** with configurable shell, working directory, environment variables, and timeouts.
 - **Live streaming** of stdout and stderr via MCP log notifications so clients observe progress as it happens.
 - **Plugin architecture** that exposes every function, class, and variable defined in the package, enabling extensions to observe command lifecycles or inject custom behaviour.
+- **Automatic ngrok tunneling** so HTTP transports are reachable without additional manual setup.
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
 - **Structured tool responses** including timing information to make results easy for agents to consume.
 
@@ -103,3 +104,28 @@ pytest
 ```
 
 Tests are parameterised to run with or without dependency stubbing, ensuring full execution paths remain verified.
+
+## Ngrok integration
+
+By default `mcp2term` opens an ngrok tunnel whenever you run the server with the `sse` or `streamable-http` transports. The tunnel exposes the local HTTP endpoint using the ngrok agent that must already be authenticated (for example via `ngrok config add-authtoken`).
+
+Control the integration with the following environment variables:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `MCP2TERM_NGROK_ENABLE` | Enable or disable automatic tunnel creation. | `true` |
+| `MCP2TERM_NGROK_TRANSPORTS` | Comma-separated transports that should be tunnelled (`stdio`, `sse`, `streamable-http`). | `sse,streamable-http` |
+| `MCP2TERM_NGROK_BIN` | Path to the `ngrok` executable. | `ngrok` |
+| `MCP2TERM_NGROK_API_URL` | Base URL for the local ngrok API. | `http://127.0.0.1:4040` |
+| `MCP2TERM_NGROK_REGION` | Optional ngrok region to target. | *(none)* |
+| `MCP2TERM_NGROK_LOG_LEVEL` | ngrok log level (`debug`, `info`, `warn`, `error`). | `info` |
+| `MCP2TERM_NGROK_EXTRA_ARGS` | JSON array of additional CLI arguments passed to ngrok. | `[]` |
+| `MCP2TERM_NGROK_ENV` | JSON object merged into the ngrok process environment. | `{}` |
+| `MCP2TERM_NGROK_START_TIMEOUT` | Seconds to wait for tunnel provisioning. | `15` |
+| `MCP2TERM_NGROK_POLL_INTERVAL` | Seconds between tunnel status checks. | `0.5` |
+| `MCP2TERM_NGROK_REQUEST_TIMEOUT` | HTTP timeout for API calls. | `5` |
+| `MCP2TERM_NGROK_SHUTDOWN_TIMEOUT` | Seconds to wait for ngrok to terminate gracefully. | `5` |
+| `MCP2TERM_NGROK_CONFIG` | Optional path to an ngrok configuration file. | *(none)* |
+| `MCP2TERM_NGROK_HOSTNAME` / `MCP2TERM_NGROK_DOMAIN` / `MCP2TERM_NGROK_EDGE` | Custom host bindings to request from ngrok. | *(none)* |
+
+Use the `--disable-ngrok` flag when running `mcp2term` to opt out of tunneling for a single invocation.
