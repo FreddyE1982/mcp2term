@@ -28,3 +28,7 @@
 ## Backpressure telemetry publishing
 - **Purpose:** Surface client and server buffering metrics to plugins and operators for proactive health monitoring.
 - **Usage:** Expose the backpressure monitor state via plugin callbacks and structured metrics endpoints so dashboards can highlight when queues are building up and trigger alerts.
+
+## Diagnostic policy plugins
+- **Purpose:** Allow deployments to customise how the client probes remote endpoints (for example, toggling probe methods, capturing historical availability metrics, or enforcing retry strategies) without modifying core client code.
+- **Usage:** Introduce a plugin hook invoked by the client before emitting startup diagnostics so plugins can adjust probe targets, provide additional context such as cached latency information, or short-circuit connection attempts during planned maintenance windows. The hook should receive the resolved endpoint URL and return a structured policy describing which probes to execute and how to present the resulting output to users.

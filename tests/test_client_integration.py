@@ -7,13 +7,15 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 
 import pytest
 import anyio
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from mcp2term_client.session import RemoteMcpSession
+from mcp2term_client.session import RemoteMcpSession, RemoteMcpSessionError
 from mcp2term_client.shell import RemoteCommandProcessor
 from mcp2term_client.state import RemoteShellState
 
@@ -97,6 +99,29 @@ def _probe_server(url: str) -> bool:
             return False
 
     return anyio.run(attempt)
+
+
+@contextmanager
+def not_found_server() -> str:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"missing")
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer((SERVER_HOST, 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://{SERVER_HOST}:{server.server_address[1]}"
+        yield url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -192,3 +217,15 @@ def test_remote_session_can_cancel_command(use_real_dependencies: bool) -> None:
 
     assert response.return_code != 0
     assert response.command_id == command_id
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_reports_diagnostics_for_not_found(use_real_dependencies: bool) -> None:
+    with not_found_server() as url:
+        session = RemoteMcpSession(url)
+        with pytest.raises(RemoteMcpSessionError) as excinfo:
+            session.start()
+        message = str(excinfo.value)
+        assert "HTTP 404" in message
+        assert url in message
+        session.close()
