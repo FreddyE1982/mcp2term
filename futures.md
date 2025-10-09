@@ -8,11 +8,6 @@
 - **Purpose:** Allow downstream consumers to retrieve large outputs without flooding log streams.
 - **Usage:** Implement an MCP resource provider that persists outputs to temporary files and references them via resource URIs alongside streamed previews.
 
-## Plugin discovery via entry points
-- **Purpose:** Simplify plugin distribution by allowing packages to register under a common entry point group.
-- **Usage:** Extend `PluginManager` to load entry points such as `mcp2term.plugins`, merging them with `MCP2TERM_PLUGINS` configuration.
-
-
 ## Ngrok metrics streaming
 - **Purpose:** Emit ngrok tunnel statistics and connection diagnostics to clients and plugins.
 - **Usage:** Add a background task to `NgrokController` that polls the ngrok administrative API and forwards aggregated metrics through the plugin registry for observability dashboards.
@@ -28,3 +23,7 @@
 ## Backpressure telemetry publishing
 - **Purpose:** Surface client and server buffering metrics to plugins and operators for proactive health monitoring.
 - **Usage:** Expose the backpressure monitor state via plugin callbacks and structured metrics endpoints so dashboards can highlight when queues are building up and trigger alerts.
+
+## Plugin capability negotiation registry
+- **Purpose:** Allow plugins to declare supported capabilities (telemetry, policy enforcement, analytics) and enable the server to orchestrate cooperative behaviour between multiple plugins without conflicts.
+- **Usage:** Extend `PluginRegistry` with a capability advertisement API and provide conflict resolution strategies so plugins can query and coordinate with other extensions at activation time.

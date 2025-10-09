@@ -73,7 +73,7 @@ Sending `cancel_command` forwards a signal (defaulting to `SIGINT`) to the runni
 
 ## Plugins
 
-Plugins implement the `PluginProtocol` (via a module-level `PLUGIN` object) and can register `CommandStreamListener` instances to observe command lifecycle events. When the server starts it loads modules listed in `MCP2TERM_PLUGINS`, exposing the entire `mcp2term` namespace through the plugin registry for inspection or extension.
+Plugins implement the `PluginProtocol` (via a module-level `PLUGIN` object) and can register `CommandStreamListener` instances to observe command lifecycle events. When the server starts it loads modules listed in `MCP2TERM_PLUGINS`, exposing the entire `mcp2term` namespace through the plugin registry for inspection or extension. The plugin manager also discovers plugins exposed through the `mcp2term.plugins` Python entry point group, so packaging a plugin for distribution automatically makes it available without additional configuration.
 
 A minimal plugin skeleton:
 
