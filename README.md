@@ -113,7 +113,7 @@ Tests are parameterised to run with or without dependency stubbing, ensuring ful
 
 ## Ngrok integration
 
-By default `mcp2term` opens an ngrok tunnel whenever you run the server with the `sse` or `streamable-http` transports. The tunnel exposes the local HTTP endpoint using the ngrok agent that must already be authenticated (for example via `ngrok config add-authtoken`).
+By default `mcp2term` opens an ngrok tunnel whenever you run the server with the `sse` or `streamable-http` transports. The tunnel exposes the local HTTP endpoint using the ngrok agent that must already be authenticated (for example via `ngrok config add-authtoken`). Unless overridden, the server now requests the reserved domain `alpaca-model-easily.ngrok-free.app` so clients always receive a predictable hostname.
 
 Control the integration with the following environment variables:
 
@@ -132,6 +132,6 @@ Control the integration with the following environment variables:
 | `MCP2TERM_NGROK_REQUEST_TIMEOUT` | HTTP timeout for API calls. | `5` |
 | `MCP2TERM_NGROK_SHUTDOWN_TIMEOUT` | Seconds to wait for ngrok to terminate gracefully. | `5` |
 | `MCP2TERM_NGROK_CONFIG` | Optional path to an ngrok configuration file. | *(none)* |
-| `MCP2TERM_NGROK_HOSTNAME` / `MCP2TERM_NGROK_DOMAIN` / `MCP2TERM_NGROK_EDGE` | Custom host bindings to request from ngrok. | *(none)* |
+| `MCP2TERM_NGROK_HOSTNAME` / `MCP2TERM_NGROK_DOMAIN` / `MCP2TERM_NGROK_EDGE` | Custom host bindings to request from ngrok. | `alpaca-model-easily.ngrok-free.app` for domain |
 
 Use the `--disable-ngrok` flag when running `mcp2term` to opt out of tunneling for a single invocation.
