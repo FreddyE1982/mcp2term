@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 import sys
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from .session import RemoteMcpSession
 from .state import RemoteShellState
@@ -168,11 +168,41 @@ class XonshShellRunner:
                 return cmd
             return f"{EXEC_FUNCTION_NAME}({cmd!r})"
 
-        events.on_transform_command.connect(transform)
+        unsubscribe = _subscribe_event(events.on_transform_command, transform)
 
         print(f"Connected to {self._url} (cwd: {self._processor.state.cwd})")
 
         try:
             XSH.shell.shell.cmdloop()
         finally:
-            events.on_transform_command.disconnect(transform)
+            unsubscribe()
+
+
+def _subscribe_event(event: Any, handler: Callable[..., Any]) -> Callable[[], None]:
+    """Subscribe to a xonsh event, returning an unsubscriber callback."""
+
+    if hasattr(event, "connect") and callable(getattr(event, "connect")):
+        event.connect(handler)
+
+        def unsubscribe() -> None:
+            event.disconnect(handler)
+
+        return unsubscribe
+
+    if callable(event):
+        registered = event(handler)
+
+        def unsubscribe() -> None:
+            target = registered or handler
+            if hasattr(event, "discard") and callable(getattr(event, "discard")):
+                event.discard(target)
+            elif hasattr(event, "remove") and callable(getattr(event, "remove")):
+                event.remove(target)
+            else:  # pragma: no cover - defensive fallback
+                raise TypeError("Event does not support removal operations")
+
+        return unsubscribe
+
+    raise TypeError(
+        "Unsupported event object: expected connect/disconnect or add/discard interface"
+    )
