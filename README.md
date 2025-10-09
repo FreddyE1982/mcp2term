@@ -1,1 +1,105 @@
 # mcp2term
+
+An implementation of a Model Context Protocol (MCP) server that grants safe, auditable access to a system shell. The server streams stdout and stderr in real time while capturing rich metadata for plugins and downstream consumers.
+
+## Features
+
+- **Full command execution** with configurable shell, working directory, environment variables, and timeouts.
+- **Live streaming** of stdout and stderr via MCP log notifications so clients observe progress as it happens.
+- **Plugin architecture** that exposes every function, class, and variable defined in the package, enabling extensions to observe command lifecycles or inject custom behaviour.
+- **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
+- **Structured tool responses** including timing information to make results easy for agents to consume.
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+The project targets Python 3.12 or newer.
+
+## Configuration
+
+`ServerConfig` reads settings from environment variables:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `MCP2TERM_SHELL` | Shell executable used for commands. | `/bin/bash` |
+| `MCP2TERM_WORKDIR` | Working directory for commands. | Current directory |
+| `MCP2TERM_INHERIT_ENV` | When `true`, inherit the parent environment. | `true` |
+| `MCP2TERM_EXTRA_ENV` | JSON object merged into the command environment. | `{}` |
+| `MCP2TERM_PLUGINS` | Comma-separated dotted module paths to load as plugins. | *(none)* |
+| `MCP2TERM_COMMAND_TIMEOUT` | Default timeout in seconds for commands. | unlimited |
+
+## Running the server
+
+```bash
+mcp2term --transport stdio
+```
+
+Change `--transport` to `sse` or `streamable-http` to use the corresponding MCP transports. `--log-level` controls verbosity and `--mount-path` overrides the HTTP mount location when relevant.
+
+## MCP tool
+
+The server registers a single tool:
+
+`run_command(command: str, working_directory: Optional[str], environment: Optional[dict[str, str]], timeout: Optional[float]])`
+
+The tool returns structured JSON containing:
+
+- `command`: executed command string
+- `working_directory`: resolved working directory
+- `return_code`: process exit code (non-zero for failure)
+- `stdout` / `stderr`: aggregated output
+- `started_at` / `finished_at`: ISO 8601 timestamps
+- `duration`: execution duration in seconds
+- `timed_out`: boolean flag indicating whether a timeout occurred
+
+While a command runs the server emits stdout and stderr chunks as MCP log messages, preserving ordering through asynchronous streaming.
+
+## Plugins
+
+Plugins implement the `PluginProtocol` (via a module-level `PLUGIN` object) and can register `CommandStreamListener` instances to observe command lifecycle events. When the server starts it loads modules listed in `MCP2TERM_PLUGINS`, exposing the entire `mcp2term` namespace through the plugin registry for inspection or extension.
+
+A minimal plugin skeleton:
+
+```python
+from dataclasses import dataclass
+
+from mcp2term.plugin import CommandStreamListener, PluginProtocol, PluginRegistry
+
+@dataclass
+class EchoListener(CommandStreamListener):
+    async def on_command_stdout(self, event):
+        print(event.data, end="")
+
+    async def on_command_start(self, event):
+        print(f"Starting: {event.request.command}")
+
+    async def on_command_stderr(self, event):
+        print(f"[stderr] {event.data}", end="")
+
+    async def on_command_complete(self, event):
+        print(f"Finished with {event.return_code}")
+
+
+class ShellEchoPlugin(PluginProtocol):
+    name = "shell-echo"
+    version = "1.0.0"
+
+    def activate(self, registry: PluginRegistry):
+        registry.register_command_listener(EchoListener())
+
+
+PLUGIN = ShellEchoPlugin()
+```
+
+## Development
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+Tests are parameterised to run with or without dependency stubbing, ensuring full execution paths remain verified.
