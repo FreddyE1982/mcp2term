@@ -1,10 +1,11 @@
 """Xonsh-based client for the mcp2term MCP server."""
 
-from .session import CommandResponse, RemoteMcpSession
+from .session import CancelCommandResponse, CommandResponse, RemoteMcpSession
 from .shell import RemoteCommandProcessor, XonshShellRunner
 from .state import RemoteShellState
 
 __all__ = [
+    "CancelCommandResponse",
     "CommandResponse",
     "RemoteCommandProcessor",
     "RemoteMcpSession",

@@ -38,10 +38,13 @@ def test_subscribe_event_supports_legacy_and_modern_events(
         return "transformed"
 
     if use_real_dependencies:
-        from xonsh.built_ins import XSH
-        from xonsh.events import events
-        from xonsh.main import setup
-        from xonsh.shell import transform_command
+        try:
+            from xonsh.built_ins import XSH
+            from xonsh.events import events
+            from xonsh.main import setup
+            from xonsh.shell import transform_command
+        except ModuleNotFoundError:
+            pytest.skip("xonsh is not available in the test environment")
 
         setup(shell_type="none")
         event = events.on_transform_command

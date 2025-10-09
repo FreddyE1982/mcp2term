@@ -12,6 +12,7 @@ from typing import Literal
 class CommandRequest:
     """Represents a command execution request."""
 
+    command_id: str
     command: str
     working_directory: str
     environment: dict[str, str]

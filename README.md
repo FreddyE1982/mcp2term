@@ -46,14 +46,15 @@ While the server is running it mirrors every executed command, stdout chunk, and
 
 When running with the `streamable-http` transport the MCP endpoint is served from the `/mcp` path (or `--mount-path` plus `/mcp` when a custom mount is provided). The CLI prints the fully qualified URL, including the `/mcp` suffix, to make tunnelling targets such as ngrok easy to copy.
 
-## MCP tool
+## MCP tools
 
-The server registers a single tool:
+The server exposes two tools for remote command management:
 
-`run_command(command: str, working_directory: Optional[str], environment: Optional[dict[str, str]], timeout: Optional[float]])`
+`run_command(command: str, working_directory: Optional[str], environment: Optional[dict[str, str]], timeout: Optional[float]], command_id: Optional[str])`
 
 The tool returns structured JSON containing:
 
+- `command_id`: unique identifier assigned to the invocation
 - `command`: executed command string
 - `working_directory`: resolved working directory
 - `return_code`: process exit code (non-zero for failure)
@@ -62,7 +63,11 @@ The tool returns structured JSON containing:
 - `duration`: execution duration in seconds
 - `timed_out`: boolean flag indicating whether a timeout occurred
 
-While a command runs the server emits stdout and stderr chunks as MCP log messages, preserving ordering through asynchronous streaming.
+While a command runs the server emits stdout and stderr chunks as MCP log messages, preserving ordering through asynchronous streaming. Clients can reuse `command_id` values when making follow-up requests.
+
+`cancel_command(command_id: str, signal_value: Optional[str | int])`
+
+Sending `cancel_command` forwards a signal (defaulting to `SIGINT`) to the running process identified by `command_id`. The response includes the numeric `signal`, its symbolic `signal_name`, and a `delivered` flag confirming whether the process was still active when the signal was sent.
 
 ## Plugins
 

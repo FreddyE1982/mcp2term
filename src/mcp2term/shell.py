@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from asyncio.subprocess import Process
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
+from uuid import uuid4
 
 from mcp.server.fastmcp import Context
 
@@ -75,6 +77,9 @@ class ShellCommandExecutor:
     def __init__(self, config: ServerConfig, plugin_manager: PluginManager) -> None:
         self.config = config
         self.plugin_manager = plugin_manager
+        self._running_commands: dict[str, Process] = {}
+        self._running_lock = asyncio.Lock()
+        self.plugin_manager.register_export("mcp2term.shell.executor", self)
 
     async def run(
         self,
@@ -84,6 +89,7 @@ class ShellCommandExecutor:
         working_directory: Path | None = None,
         environment: Mapping[str, str] | None = None,
         timeout: float | None = None,
+        command_id: str | None = None,
     ) -> CommandResult:
         env = self.config.build_environment()
         if environment:
@@ -91,6 +97,7 @@ class ShellCommandExecutor:
         cwd = str((working_directory or self.config.working_directory).expanduser().resolve())
         timeout_value = timeout if timeout is not None else self.config.command_timeout
         request = CommandRequest(
+            command_id=command_id or uuid4().hex,
             command=command,
             working_directory=cwd,
             environment=dict(env),
@@ -100,76 +107,86 @@ class ShellCommandExecutor:
         await self.plugin_manager.emit_command_start(CommandStartEvent(request=request, started_at=started_at))
         emitter = _ContextEmitter(ctx, self.plugin_manager, request)
 
+        process: Process | None = None
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                executable=self.config.shell_path,
-            )
-        except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+            try:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    executable=self.config.shell_path,
+                )
+            except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+                finished_at = utcnow()
+                event = CommandCompleteEvent(
+                    request=request,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    return_code=-1,
+                    stdout="",
+                    stderr=str(exc),
+                    duration=(finished_at - started_at).total_seconds(),
+                )
+                await self.plugin_manager.emit_command_complete(event)
+                raise CommandExecutionError(f"Failed to execute command: {exc}", event=event) from exc
+
+            async with self._running_lock:
+                assert process is not None
+                self._running_commands[request.command_id] = process
+
+            stdout_task = asyncio.create_task(self._consume_stream(process.stdout, emitter.emit_stdout))
+            stderr_task = asyncio.create_task(self._consume_stream(process.stderr, emitter.emit_stderr))
+
+            async def wait_process(proc: Process) -> int:
+                if timeout_value is None:
+                    return await proc.wait()
+                return await asyncio.wait_for(proc.wait(), timeout=timeout_value)
+
+            timed_out = False
+            try:
+                return_code = await wait_process(process)
+            except asyncio.TimeoutError:
+                timed_out = True
+                process.kill()
+                await process.wait()
+                return_code = process.returncode or -1
+            except Exception:
+                process.kill()
+                await process.wait()
+                raise
+
+            stdout_text, stderr_text = await asyncio.gather(stdout_task, stderr_task)
             finished_at = utcnow()
             event = CommandCompleteEvent(
                 request=request,
                 started_at=started_at,
                 finished_at=finished_at,
-                return_code=-1,
-                stdout="",
-                stderr=str(exc),
+                return_code=return_code,
+                stdout=stdout_text,
+                stderr=stderr_text,
                 duration=(finished_at - started_at).total_seconds(),
             )
             await self.plugin_manager.emit_command_complete(event)
-            raise CommandExecutionError(f"Failed to execute command: {exc}", event=event) from exc
 
-        stdout_task = asyncio.create_task(self._consume_stream(process.stdout, emitter.emit_stdout))
-        stderr_task = asyncio.create_task(self._consume_stream(process.stderr, emitter.emit_stderr))
+            if timed_out:
+                raise CommandTimeoutError(
+                    f"Command '{command}' timed out after {timeout_value} seconds", event=event
+                )
 
-        async def wait_process(proc: Process) -> int:
-            if timeout_value is None:
-                return await proc.wait()
-            return await asyncio.wait_for(proc.wait(), timeout=timeout_value)
-
-        timed_out = False
-        try:
-            return_code = await wait_process(process)
-        except asyncio.TimeoutError:
-            timed_out = True
-            process.kill()
-            await process.wait()
-            return_code = process.returncode or -1
-        except Exception:
-            process.kill()
-            await process.wait()
-            raise
-
-        stdout_text, stderr_text = await asyncio.gather(stdout_task, stderr_task)
-        finished_at = utcnow()
-        event = CommandCompleteEvent(
-            request=request,
-            started_at=started_at,
-            finished_at=finished_at,
-            return_code=return_code,
-            stdout=stdout_text,
-            stderr=stderr_text,
-            duration=(finished_at - started_at).total_seconds(),
-        )
-        await self.plugin_manager.emit_command_complete(event)
-
-        if timed_out:
-            raise CommandTimeoutError(
-                f"Command '{command}' timed out after {timeout_value} seconds", event=event
+            return CommandResult(
+                request=request,
+                stdout=stdout_text,
+                stderr=stderr_text,
+                return_code=return_code,
+                started_at=started_at,
+                finished_at=finished_at,
             )
-
-        return CommandResult(
-            request=request,
-            stdout=stdout_text,
-            stderr=stderr_text,
-            return_code=return_code,
-            started_at=started_at,
-            finished_at=finished_at,
-        )
+        finally:
+            if process is not None:
+                async with self._running_lock:
+                    self._running_commands.pop(request.command_id, None)
 
     async def _consume_stream(
         self,
@@ -190,3 +207,29 @@ class ShellCommandExecutor:
         except asyncio.CancelledError:
             raise
         return "".join(chunks)
+
+    async def send_signal(self, command_id: str, sig: int = signal.SIGINT) -> bool:
+        """Send ``sig`` to the running command identified by ``command_id``."""
+
+        async with self._running_lock:
+            process = self._running_commands.get(command_id)
+
+        if process is None:
+            return False
+
+        try:
+            process.send_signal(sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except AttributeError:  # pragma: no cover - platform fallback
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return False
+            return True
+
+    async def interrupt(self, command_id: str) -> bool:
+        """Send ``SIGINT`` to the running command when present."""
+
+        return await self.send_signal(command_id, signal.SIGINT)

@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
@@ -39,6 +40,7 @@ def _normalize_streamable_http_url(url: str) -> str:
 class CommandResponse:
     """Structured response returned from the server's ``run_command`` tool."""
 
+    command_id: str
     command: str
     working_directory: str
     return_code: int
@@ -66,6 +68,7 @@ class CommandResponse:
                     if isinstance(data, dict):
                         payload.update(data)
         return cls(
+            command_id=str(payload.get("command_id", "")),
             command=str(payload.get("command", "")),
             working_directory=str(payload.get("working_directory", "")),
             return_code=int(payload.get("return_code", 0)),
@@ -75,6 +78,38 @@ class CommandResponse:
             finished_at=str(payload.get("finished_at", "")),
             duration=float(payload.get("duration", 0.0)),
             timed_out=bool(payload.get("timed_out", False)),
+        )
+
+
+@dataclass(slots=True)
+class CancelCommandResponse:
+    """Response returned from the server's ``cancel_command`` tool."""
+
+    command_id: str
+    signal: int | None
+    signal_name: str | None
+    delivered: bool
+
+    @classmethod
+    def from_call_tool_result(cls, result: types.CallToolResult) -> "CancelCommandResponse":
+        payload: dict[str, Any] = {}
+        if result.structuredContent:
+            payload.update(result.structuredContent)
+        else:
+            for block in result.content:
+                if isinstance(block, types.TextContent):
+                    try:
+                        data = json.loads(block.text)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(data, dict):
+                        payload.update(data)
+        signal_value = payload.get("signal")
+        return cls(
+            command_id=str(payload.get("command_id", "")),
+            signal=int(signal_value) if signal_value is not None else None,
+            signal_name=str(payload.get("signal_name")) if payload.get("signal_name") is not None else None,
+            delivered=bool(payload.get("delivered", False)),
         )
 
 
@@ -150,6 +185,7 @@ class RemoteMcpSession:
         self._worker_future: Future[Any] | None = None
         self._startup_ready = threading.Event()
         self._startup_error: BaseException | None = None
+        self._active_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def default_timeout(self) -> float | None:
@@ -166,6 +202,12 @@ class RemoteMcpSession:
         """Original URL provided by the user before normalization."""
 
         return self._raw_url
+
+    @staticmethod
+    def generate_command_id() -> str:
+        """Create a unique command identifier suitable for cancellation requests."""
+
+        return uuid4().hex
 
     def start(self) -> None:
         if self._started:
@@ -209,20 +251,60 @@ class RemoteMcpSession:
         environment: dict[str, str] | None = None,
         ephemeral_environment: dict[str, str] | None = None,
         timeout: float | None = None,
+        command_id: str | None = None,
     ) -> CommandResponse:
+        command_id, future = self.run_command_async(
+            command,
+            working_directory=working_directory,
+            environment=environment,
+            ephemeral_environment=ephemeral_environment,
+            timeout=timeout,
+            command_id=command_id,
+        )
+        return future.result()
+
+    def run_command_async(
+        self,
+        command: str,
+        *,
+        working_directory: str | None,
+        environment: dict[str, str] | None = None,
+        ephemeral_environment: dict[str, str] | None = None,
+        timeout: float | None = None,
+        command_id: str | None = None,
+    ) -> tuple[str, Future[CommandResponse]]:
         env: dict[str, str] = {}
         if environment:
             env.update(environment)
         if ephemeral_environment:
             env.update(ephemeral_environment)
         effective_timeout = timeout if timeout is not None else self._default_timeout
-        return self._submit_request(
+        actual_command_id = command_id or self.generate_command_id()
+        future = self._submit_request(
             "call_tool",
             command=command,
             working_directory=working_directory,
             environment=env,
             timeout=effective_timeout,
+            command_id=actual_command_id,
+            wait=False,
         )
+        assert isinstance(future, Future)
+        return actual_command_id, future
+
+    def cancel_command(
+        self,
+        command_id: str,
+        *,
+        signal: str | int | None = None,
+    ) -> CancelCommandResponse:
+        response = self._submit_request(
+            "cancel_command",
+            command_id=command_id,
+            signal_value=signal,
+        )
+        assert isinstance(response, CancelCommandResponse)
+        return response
 
     def resolve_working_directory(self, working_directory: str | None = None) -> str:
         response = self.run_command(
@@ -311,11 +393,35 @@ class RemoteMcpSession:
                     break
                 try:
                     if request.action == "call_tool":
-                        result = await self._async_call_tool(
-                            request.payload["command"],
-                            request.payload.get("working_directory"),
-                            request.payload.get("environment", {}),
-                            request.payload.get("timeout"),
+                        task = asyncio.create_task(
+                            self._async_call_tool(
+                                request.payload["command"],
+                                request.payload.get("working_directory"),
+                                request.payload.get("environment", {}),
+                                request.payload.get("timeout"),
+                                request.payload.get("command_id"),
+                            )
+                        )
+                        self._active_tasks.add(task)
+
+                        def _complete(
+                            finished: asyncio.Task[Any],
+                            *,
+                            future: Future[Any],
+                        ) -> None:
+                            self._active_tasks.discard(finished)
+                            try:
+                                result = finished.result()
+                            except Exception as error:
+                                future.set_exception(error)
+                            else:
+                                future.set_result(result)
+
+                        task.add_done_callback(lambda finished, future=request.future: _complete(finished, future=future))
+                    elif request.action == "cancel_command":
+                        result = await self._async_cancel_command(
+                            request.payload["command_id"],
+                            request.payload.get("signal_value"),
                         )
                         request.future.set_result(result)
                     else:
@@ -327,6 +433,13 @@ class RemoteMcpSession:
             self._startup_ready.set()
             raise
         finally:
+            if self._active_tasks:
+                pending = list(self._active_tasks)
+                self._active_tasks.clear()
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
             try:
                 if self._session is not None:
                     await self._session.__aexit__(None, None, None)
@@ -340,7 +453,7 @@ class RemoteMcpSession:
                 self._transport = None
             self._request_queue = None
 
-    def _submit_request(self, action: str, **payload: Any) -> Any:
+    def _submit_request(self, action: str, wait: bool = True, **payload: Any) -> Any | Future[Any]:
         if self._loop is None or self._request_queue is None:
             raise RuntimeError("RemoteMcpSession used before start()")
         future: Future[Any] = Future()
@@ -353,7 +466,9 @@ class RemoteMcpSession:
             self._request_queue.put_nowait(request)
 
         self._loop.call_soon_threadsafe(_enqueue)
-        return future.result()
+        if wait:
+            return future.result()
+        return future
 
     async def _async_call_tool(
         self,
@@ -361,6 +476,7 @@ class RemoteMcpSession:
         working_directory: str | None,
         environment: dict[str, str],
         timeout: float | None,
+        command_id: str | None,
     ) -> CommandResponse:
         if self._session is None:
             raise RuntimeError("RemoteMcpSession used before start()")
@@ -371,8 +487,23 @@ class RemoteMcpSession:
             arguments["environment"] = environment
         if timeout is not None:
             arguments["timeout"] = timeout
+        if command_id is not None:
+            arguments["command_id"] = command_id
         result = await self._session.call_tool("run_command", arguments)
         return CommandResponse.from_call_tool_result(result)
+
+    async def _async_cancel_command(
+        self,
+        command_id: str,
+        signal_value: str | int | None,
+    ) -> CancelCommandResponse:
+        if self._session is None:
+            raise RuntimeError("RemoteMcpSession used before start()")
+        arguments: dict[str, Any] = {"command_id": command_id}
+        if signal_value is not None:
+            arguments["signal_value"] = signal_value
+        result = await self._session.call_tool("cancel_command", arguments)
+        return CancelCommandResponse.from_call_tool_result(result)
 
     async def _handle_log_message(self, params: types.LoggingMessageNotificationParams) -> None:
         data = params.data
