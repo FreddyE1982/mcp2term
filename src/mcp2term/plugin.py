@@ -9,6 +9,7 @@ import logging
 import pkgutil
 import sys
 from dataclasses import dataclass, field
+from importlib import metadata
 from types import ModuleType
 from typing import Any, Awaitable, Iterable, Mapping, MutableMapping, Protocol, TextIO, runtime_checkable
 
@@ -121,10 +122,14 @@ class PluginManager:
     exports: MutableMapping[str, Any] = field(default_factory=dict)
     command_listeners: list[CommandStreamListener] = field(default_factory=list)
     loaded_plugins: dict[str, PluginProtocol] = field(default_factory=dict)
+    entry_point_group: str = "mcp2term.plugins"
     _console_echo_listener: ConsoleEchoListener | None = field(
         default=None, init=False, repr=False
     )
     _export_packages: set[str] = field(default_factory=set, init=False, repr=False)
+    _normalized_module_cache: dict[tuple[str, ...], tuple[str, ...]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._initialize_export_packages()
@@ -231,21 +236,131 @@ class PluginManager:
         return names
 
     async def load_plugins_async(self, module_names: tuple[str, ...]) -> None:
-        """Load plugin modules by dotted names."""
+        """Load plugin modules and entry point plugins."""
 
-        for module_name in module_names:
-            if module_name in self.loaded_plugins:
-                logger.debug("Plugin %s already loaded", module_name)
+        normalized_modules = self._normalize_module_names(module_names)
+        skip_module_names: set[str] = set()
+
+        for entry_point in self._iter_entry_points():
+            key = f"entry_point:{entry_point.name}"
+            if key in self.loaded_plugins:
+                logger.debug("Entry point plugin %s already loaded", entry_point.name)
                 continue
-            logger.info("Loading plugin module %s", module_name)
-            module = importlib.import_module(module_name)
-            plugin = self._locate_plugin(module)
-            registry = PluginRegistry(self)
-            activation_result = plugin.activate(registry)
-            if inspect.isawaitable(activation_result):
-                await activation_result
-            self.loaded_plugins[module_name] = plugin
-            self.refresh_exports()
+            plugin_info = self._load_entry_point(entry_point)
+            if plugin_info is None:
+                continue
+            plugin_key, plugin, module_name = plugin_info
+            if module_name:
+                skip_module_names.add(module_name)
+            await self._activate_plugin(plugin_key, plugin)
+
+        for module_name in normalized_modules:
+            if module_name in skip_module_names:
+                logger.debug(
+                    "Skipping configured module %s because it was provided by an entry point",
+                    module_name,
+                )
+                continue
+            await self._load_plugin_module(module_name)
+
+    def _normalize_module_names(self, module_names: Iterable[str]) -> tuple[str, ...]:
+        key = tuple(module_names)
+        if key in self._normalized_module_cache:
+            return self._normalized_module_cache[key]
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for module_name in module_names:
+            name = module_name.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            normalized.append(name)
+        result = tuple(normalized)
+        self._normalized_module_cache[key] = result
+        return result
+
+    async def _activate_plugin(self, key: str, plugin: PluginProtocol) -> None:
+        logger.info("Activating plugin %s", key)
+        registry = PluginRegistry(self)
+        activation_result = plugin.activate(registry)
+        if inspect.isawaitable(activation_result):
+            await activation_result
+        self.loaded_plugins[key] = plugin
+        self.refresh_exports()
+
+    async def _load_plugin_module(self, module_name: str) -> None:
+        if module_name in self.loaded_plugins:
+            logger.debug("Plugin %s already loaded", module_name)
+            return
+        logger.info("Loading plugin module %s", module_name)
+        module = importlib.import_module(module_name)
+        plugin = self._locate_plugin(module)
+        await self._activate_plugin(module_name, plugin)
+
+    def _iter_entry_points(self) -> Iterable[metadata.EntryPoint]:
+        try:
+            entry_points = metadata.entry_points()
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("Failed to enumerate entry points for plugin discovery")
+            return ()
+        if hasattr(entry_points, "select"):
+            selected = entry_points.select(group=self.entry_point_group)
+        else:  # pragma: no cover - Python < 3.10 compatibility path
+            selected = entry_points.get(self.entry_point_group, ())  # type: ignore[assignment]
+        return tuple(selected)
+
+    def _load_entry_point(
+        self, entry_point: metadata.EntryPoint
+    ) -> tuple[str, PluginProtocol, str | None] | None:
+        try:
+            loaded = entry_point.load()
+        except Exception:
+            logger.exception("Failed to load entry point %s", entry_point.name)
+            return None
+
+        try:
+            plugin_object = self._coerce_plugin_object(loaded, entry_point=entry_point)
+        except Exception:  # pragma: no cover - defensive logging for unexpected errors
+            logger.exception(
+                "Unhandled error while preparing plugin from entry point %s",
+                entry_point.name,
+            )
+            return None
+        if plugin_object is None:
+            logger.warning(
+                "Entry point %s did not resolve to a PluginProtocol instance", entry_point.name
+            )
+            return None
+
+        module_name = getattr(plugin_object, "__module__", None)
+        plugin_key = f"entry_point:{entry_point.name}"
+        return plugin_key, plugin_object, module_name
+
+    def _coerce_plugin_object(
+        self,
+        candidate: Any,
+        *,
+        entry_point: metadata.EntryPoint | None = None,
+    ) -> PluginProtocol | None:
+        if isinstance(candidate, PluginProtocol):  # type: ignore[arg-type]
+            return candidate
+        if isinstance(candidate, ModuleType):
+            return self._locate_plugin(candidate)
+        if isinstance(candidate, str):
+            module = importlib.import_module(candidate)
+            return self._locate_plugin(module)
+        if inspect.isclass(candidate):
+            try:
+                instance = candidate()
+            except Exception:
+                logger.exception(
+                    "Failed to instantiate plugin class %s from entry point %s",
+                    candidate,
+                    entry_point.name if entry_point else "<unknown>",
+                )
+                return None
+            return self._coerce_plugin_object(instance, entry_point=entry_point)
+        return None
 
     def register_export(self, qualified_name: str, value: Any) -> None:
         """Register or update an export available to plugins."""
