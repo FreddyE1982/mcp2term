@@ -34,11 +34,36 @@ The project targets Python 3.12 or newer.
 
 ## Running the server
 
+For a quick local loop, install the package (ideally inside a virtual environment) and launch the Streamable HTTP transport:
+
 ```bash
-mcp2term --transport stdio
+mcp2term --transport streamable-http --disable-ngrok
 ```
 
-Change `--transport` to `sse` or `streamable-http` to use the corresponding MCP transports. `--log-level` controls verbosity and `--mount-path` overrides the HTTP mount location when relevant.
+The server listens on `http://127.0.0.1:8000/mcp` by default. Keep the terminal open while it is running. Use `--transport stdio` when integrating with standard MCP clients that expect stdin/stdout pipes, or `--transport sse` for legacy HTTP streaming.
+
+Change `--transport` to `sse` or `stdio` to use the corresponding MCP transports. `--log-level` controls verbosity and `--mount-path` overrides the HTTP mount location when relevant.
+
+Refer to [`docs/local_usage.md`](docs/local_usage.md) for a detailed walkthrough that covers dependency installation, configuration, and troubleshooting tips when pairing the server with the companion client.
+
+### Running the server with ngrok
+
+When you want to expose the MCP server beyond your LAN, enable the built-in ngrok integration. Authenticate the ngrok agent once with your account token:
+
+```bash
+ngrok config add-authtoken <token>
+```
+
+Launch the server with any HTTP transport (for example Streamable HTTP). ngrok starts automatically and prints the public URL:
+
+```bash
+mcp2term --transport streamable-http
+# ... look for "ngrok public URL" in the logs
+```
+
+Share the printed `https://` forwarding URL with remote clients. When you're finished, stop the server process; the tunnel shuts down automatically.
+
+Tune tunnelling behaviour through the `MCP2TERM_NGROK_*` environment variables documented below—for example set `MCP2TERM_NGROK_REGION=eu` to pin the tunnel to a specific region or `MCP2TERM_NGROK_HOSTNAME=demo.example` when your plan supports custom domains.
 
 ## MCP tool
 

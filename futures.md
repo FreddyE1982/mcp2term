@@ -20,3 +20,7 @@
 ## Remote command cancellation
 - **Purpose:** Allow the client to send interrupts or termination signals to long-running remote commands.
 - **Usage:** Extend the MCP tool interface with a cancellation endpoint and expose a control shortcut in the xonsh client that forwards `SIGINT` to the remote process.
+
+## Local session presets
+- **Purpose:** Streamline developer onboarding by shipping reusable presets that configure transports, shell preferences, and plugin stacks for common environments (e.g., "local testing", "ngrok demo", "CI smoke test").
+- **Usage:** Introduce a preset loader exposed via the global plugin registry so plugins and CLI helpers can discover named presets and apply them before spinning up the server or client sessions.
