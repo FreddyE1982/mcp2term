@@ -157,4 +157,24 @@ def create_server(
             "delivered": delivered,
         }
 
+    @server.tool(name="send_stdin", description="Forward input to a running command's stdin pipe.")
+    async def send_stdin(  # type: ignore[no-redef]
+        command_id: str,
+        data: str | None = None,
+        *,
+        eof: bool = False,
+        ctx: Context[ServerSession, ApplicationState],
+    ) -> dict[str, Any]:
+        payload = data or ""
+        accepted = await ctx.request_context.lifespan_context.executor.send_stdin(
+            command_id,
+            payload,
+            eof=eof,
+        )
+        return {
+            "command_id": command_id,
+            "accepted": accepted,
+            "eof": eof,
+        }
+
     return server

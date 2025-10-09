@@ -125,6 +125,35 @@ class CancelCommandResponse:
 
 
 @dataclass(slots=True)
+class SendInputResponse:
+    """Response confirming delivery of stdin data to a running command."""
+
+    command_id: str
+    accepted: bool
+    eof: bool
+
+    @classmethod
+    def from_call_tool_result(cls, result: types.CallToolResult) -> "SendInputResponse":
+        payload: dict[str, Any] = {}
+        if result.structuredContent:
+            payload.update(result.structuredContent)
+        else:
+            for block in result.content:
+                if isinstance(block, types.TextContent):
+                    try:
+                        data = json.loads(block.text)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(data, dict):
+                        payload.update(data)
+        return cls(
+            command_id=str(payload.get("command_id", "")),
+            accepted=bool(payload.get("accepted", False)),
+            eof=bool(payload.get("eof", False)),
+        )
+
+
+@dataclass(slots=True)
 class LogMessage:
     """Represents a streaming log message from the MCP session."""
 
@@ -403,6 +432,22 @@ class RemoteMcpSession:
         assert isinstance(response, CancelCommandResponse)
         return response
 
+    def send_stdin(
+        self,
+        command_id: str,
+        data: str,
+        *,
+        eof: bool = False,
+    ) -> bool:
+        response = self._submit_request(
+            "send_stdin",
+            command_id=command_id,
+            data=data,
+            eof=eof,
+        )
+        assert isinstance(response, SendInputResponse)
+        return response.accepted
+
     def resolve_working_directory(self, working_directory: str | None = None) -> str:
         response = self.run_command(
             "pwd",
@@ -530,6 +575,13 @@ class RemoteMcpSession:
                             request.payload.get("signal_value"),
                         )
                         request.future.set_result(result)
+                    elif request.action == "send_stdin":
+                        result = await self._async_send_stdin(
+                            request.payload["command_id"],
+                            request.payload.get("data", ""),
+                            request.payload.get("eof", False),
+                        )
+                        request.future.set_result(result)
                     else:
                         raise RuntimeError(f"Unknown request action: {request.action}")
                 except Exception as exc:
@@ -630,6 +682,20 @@ class RemoteMcpSession:
             arguments["signal_value"] = signal_value
         result = await self._session.call_tool("cancel_command", arguments)
         return CancelCommandResponse.from_call_tool_result(result)
+
+    async def _async_send_stdin(
+        self,
+        command_id: str,
+        data: str,
+        eof: bool,
+    ) -> SendInputResponse:
+        if self._session is None:
+            raise RuntimeError("RemoteMcpSession used before start()")
+        arguments: dict[str, Any] = {"command_id": command_id, "eof": eof}
+        if data:
+            arguments["data"] = data
+        result = await self._session.call_tool("send_stdin", arguments)
+        return SendInputResponse.from_call_tool_result(result)
 
     async def _handle_log_message(self, params: types.LoggingMessageNotificationParams) -> None:
         data = params.data

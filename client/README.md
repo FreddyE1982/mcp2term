@@ -11,6 +11,7 @@ stdout/stderr stream back in real time.
 - Live streaming of stdout and stderr via MCP logging notifications.
 - Persistent working directory and environment management using the server's tool arguments.
 - Support for shell built-ins such as `cd`, inline environment assignments, `export`, and `unset`.
+- Interactive stdin streaming so REPLs like `python` behave just like a local terminal session.
 - Forward `Ctrl+C` interrupts to the remote server, delivering configurable signals via the MCP `cancel_command` tool.
 - Friendly prompt that shows the remote working directory.
 - Backpressure detection that reports when the client buffers output or pending commands so you know when to wait for catch-up.

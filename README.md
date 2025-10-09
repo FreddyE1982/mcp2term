@@ -71,6 +71,12 @@ While a command runs the server emits stdout and stderr chunks as MCP log messag
 
 Sending `cancel_command` forwards a signal (defaulting to `SIGINT`) to the running process identified by `command_id`. The response includes the numeric `signal`, its symbolic `signal_name`, and a `delivered` flag confirming whether the process was still active when the signal was sent.
 
+`send_stdin(command_id: str, data: Optional[str], eof: bool = False)`
+
+Use `send_stdin` to stream additional input to an interactive command. The tool accepts optional text payloads and an `eof` flag
+that closes the stdin pipe once all required data has been delivered. The response reports whether the input was accepted so
+clients can retry or surface helpful diagnostics.
+
 ## Plugins
 
 Plugins implement the `PluginProtocol` (via a module-level `PLUGIN` object) and can register `CommandStreamListener` instances to observe command lifecycle events. When the server starts it loads modules listed in `MCP2TERM_PLUGINS`, exposing the entire `mcp2term` namespace through the plugin registry for inspection or extension.

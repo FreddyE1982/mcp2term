@@ -137,3 +137,36 @@ def test_shell_executor_handles_large_output(use_real_dependencies: bool) -> Non
     assert len(result.stdout) == 131072
     assert any(chunk.stream == "stdout" for chunk in recorder.chunks)
     assert result.return_code == 0
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_shell_executor_streams_stdin(use_real_dependencies: bool) -> None:
+    config = ServerConfig()
+    manager = PluginManager()
+    manager.refresh_exports()
+    recorder = InMemoryStreamRecorder()
+    PluginRegistry(manager).register_command_listener(recorder)
+    executor = ShellCommandExecutor(config, manager)
+
+    async def run_with_input() -> CommandResult:
+        command_id = "stdin-test"
+        task = asyncio.create_task(
+            executor.run(
+                "python -c \"import sys; print(sys.stdin.readline().strip())\"",
+                command_id=command_id,
+            )
+        )
+        while recorder.start_event is None:
+            await asyncio.sleep(0.05)
+        delivered = False
+        for _ in range(50):
+            delivered = await executor.send_stdin(command_id, "interactive input\n")
+            if delivered:
+                break
+            await asyncio.sleep(0.05)
+        assert delivered, "Expected stdin delivery to succeed"
+        await executor.send_stdin(command_id, "", eof=True)
+        return await task
+
+    result = asyncio.run(run_with_input())
+    assert "interactive input" in result.stdout
