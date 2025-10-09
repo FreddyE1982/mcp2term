@@ -120,3 +120,20 @@ def test_shell_executor_interrupts_running_command(use_real_dependencies: bool) 
 
     result = asyncio.run(run_and_interrupt())
     assert result.return_code != 0
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_shell_executor_handles_large_output(use_real_dependencies: bool) -> None:
+    config = ServerConfig(stream_chunk_size=4096)
+    manager = PluginManager()
+    manager.refresh_exports()
+    recorder = InMemoryStreamRecorder()
+    PluginRegistry(manager).register_command_listener(recorder)
+    executor = ShellCommandExecutor(config, manager)
+
+    command = "python -c \"import sys; sys.stdout.write('x'*131072)\""
+    result = asyncio.run(executor.run(command))
+
+    assert len(result.stdout) == 131072
+    assert any(chunk.stream == "stdout" for chunk in recorder.chunks)
+    assert result.return_code == 0

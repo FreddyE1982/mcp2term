@@ -22,6 +22,7 @@ class ServerConfig:
     plugin_modules: tuple[str, ...] = ()
     command_timeout: float | None = None
     console_echo: bool = True
+    stream_chunk_size: int = 65536
     ngrok: NgrokSettings = field(default_factory=NgrokSettings)
 
     @classmethod
@@ -77,6 +78,16 @@ class ServerConfig:
                 console_echo_enabled = False
             else:
                 raise ValueError("MCP2TERM_CONSOLE_ECHO must be a boolean value")
+        chunk_size_raw = env.get("MCP2TERM_STREAM_CHUNK_SIZE")
+        if chunk_size_raw is None:
+            stream_chunk_size = defaults.stream_chunk_size
+        else:
+            try:
+                stream_chunk_size = int(chunk_size_raw)
+            except ValueError as exc:
+                raise ValueError("MCP2TERM_STREAM_CHUNK_SIZE must be an integer") from exc
+            if stream_chunk_size <= 0:
+                raise ValueError("MCP2TERM_STREAM_CHUNK_SIZE must be a positive integer")
         ngrok_settings = NgrokSettings()
         ngrok_enable_raw = env.get("MCP2TERM_NGROK_ENABLE")
         if ngrok_enable_raw is not None:
@@ -179,6 +190,7 @@ class ServerConfig:
             plugin_modules=plugin_modules,
             command_timeout=timeout_value,
             console_echo=console_echo_enabled,
+            stream_chunk_size=stream_chunk_size,
             ngrok=ngrok_settings,
         )
 

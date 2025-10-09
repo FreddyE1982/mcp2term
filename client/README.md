@@ -13,6 +13,7 @@ stdout/stderr stream back in real time.
 - Support for shell built-ins such as `cd`, inline environment assignments, `export`, and `unset`.
 - Forward `Ctrl+C` interrupts to the remote server, delivering configurable signals via the MCP `cancel_command` tool.
 - Friendly prompt that shows the remote working directory.
+- Backpressure detection that reports when the client buffers output or pending commands so you know when to wait for catch-up.
 
 ## Usage
 

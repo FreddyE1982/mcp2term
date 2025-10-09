@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import signal
 from asyncio.subprocess import Process
 from dataclasses import dataclass
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 from uuid import uuid4
@@ -195,18 +197,27 @@ class ShellCommandExecutor:
     ) -> str:
         if stream is None:
             return ""
-        chunks: list[str] = []
+
+        chunk_size = max(1, int(self.config.stream_chunk_size))
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffer = StringIO()
         try:
             while True:
-                data = await stream.readline()
+                data = await stream.read(chunk_size)
                 if not data:
                     break
-                text = data.decode("utf-8", errors="replace")
-                chunks.append(text)
-                await emitter(text)
+                text = decoder.decode(data)
+                if text:
+                    buffer.write(text)
+                    await emitter(text)
         except asyncio.CancelledError:
             raise
-        return "".join(chunks)
+
+        remaining = decoder.decode(b"", final=True)
+        if remaining:
+            buffer.write(remaining)
+            await emitter(remaining)
+        return buffer.getvalue()
 
     async def send_signal(self, command_id: str, sig: int = signal.SIGINT) -> bool:
         """Send ``sig`` to the running command identified by ``command_id``."""

@@ -6,10 +6,11 @@ import asyncio
 import importlib
 import inspect
 import logging
+import pkgutil
 import sys
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Awaitable, Mapping, MutableMapping, Protocol, TextIO, runtime_checkable
+from typing import Any, Awaitable, Iterable, Mapping, MutableMapping, Protocol, TextIO, runtime_checkable
 
 from .streaming import (
     CommandCompleteEvent,
@@ -123,8 +124,10 @@ class PluginManager:
     _console_echo_listener: ConsoleEchoListener | None = field(
         default=None, init=False, repr=False
     )
+    _export_packages: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._initialize_export_packages()
         self._ensure_console_echo_listener()
 
     def _ensure_console_echo_listener(self) -> None:
@@ -133,6 +136,28 @@ class PluginManager:
         listener = ConsoleEchoListener()
         self.command_listeners.append(listener)
         self._console_echo_listener = listener
+
+    def _initialize_export_packages(self) -> None:
+        """Seed export packages with known namespaces from this repository."""
+
+        for package_name in ("mcp2term", "mcp2term_client"):
+            self.register_export_package(package_name, missing_ok=True)
+
+    def register_export_package(self, package_name: str, *, missing_ok: bool = False) -> None:
+        """Register an importable package whose members should be exposed to plugins."""
+
+        try:
+            importlib.import_module(package_name)
+        except ModuleNotFoundError:
+            if missing_ok:
+                return
+            raise
+        self._export_packages.add(package_name)
+
+    def list_export_packages(self) -> tuple[str, ...]:
+        """Return the tuple of package names whose exports are tracked."""
+
+        return tuple(sorted(self._export_packages))
 
     def set_console_echo_enabled(self, enabled: bool) -> None:
         """Enable or disable mirroring command activity to the local console."""
@@ -156,16 +181,14 @@ class PluginManager:
         """Refresh exported symbols from loaded mcp2term modules."""
 
         logger.debug("Refreshing plugin exports")
-        for module_name, module in list(sys.modules.items()):
-            if not module_name.startswith("mcp2term"):
+        module_names = set(self._gather_known_module_names())
+        for module_name in sorted(module_names):
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:  # pragma: no cover - defensive guard for optional deps
+                logger.exception("Failed to import %s while collecting plugin exports", module_name)
                 continue
-            if not isinstance(module, ModuleType):
-                continue
-            for attr_name, value in vars(module).items():
-                if attr_name.startswith("_"):
-                    continue
-                qualified_name = f"{module_name}.{attr_name}"
-                self.exports[qualified_name] = value
+            self.register_module_exports(module)
 
     def register_module_exports(self, module: ModuleType) -> None:
         """Register exports from a specific module."""
@@ -175,6 +198,37 @@ class PluginManager:
                 continue
             qualified_name = f"{module.__name__}.{attr_name}"
             self.exports[qualified_name] = value
+
+    def _gather_known_module_names(self) -> Iterable[str]:
+        """Collect module names from registered packages and the current interpreter state."""
+
+        discovered: set[str] = set()
+        package_prefixes = tuple(sorted(self._export_packages))
+        for package_name in package_prefixes:
+            discovered.update(self._discover_package_modules(package_name))
+        for module_name, module in list(sys.modules.items()):
+            if package_prefixes and not module_name.startswith(package_prefixes):
+                continue
+            if not isinstance(module, ModuleType):
+                continue
+            discovered.add(module_name)
+        return discovered
+
+    def _discover_package_modules(self, package_name: str) -> set[str]:
+        """Return module names found within ``package_name`` without importing them eagerly."""
+
+        names: set[str] = set()
+        try:
+            package = importlib.import_module(package_name)
+        except ModuleNotFoundError:
+            return names
+        names.add(package.__name__)
+        package_path = getattr(package, "__path__", None)
+        if package_path is None:
+            return names
+        for module_info in pkgutil.walk_packages(package_path, f"{package.__name__}."):
+            names.add(module_info.name)
+        return names
 
     async def load_plugins_async(self, module_names: tuple[str, ...]) -> None:
         """Load plugin modules by dotted names."""
