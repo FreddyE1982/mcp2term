@@ -20,3 +20,7 @@
 ## Remote command cancellation
 - **Purpose:** Allow the client to send interrupts or termination signals to long-running remote commands.
 - **Usage:** Extend the MCP tool interface with a cancellation endpoint and expose a control shortcut in the xonsh client that forwards `SIGINT` to the remote process.
+
+## Console echo customization templates
+- **Purpose:** Allow operators to customise the console mirroring format, destination streams, and optional persistence into structured logs.
+- **Usage:** Extend `ConsoleEchoListener` with configurable format strings supplied via `ServerConfig` and expose plugin hooks to replace or augment the default listener while keeping mirroring guarantees.

@@ -45,3 +45,51 @@ async def test_shell_executor_timeout_records_completion(use_real_dependencies: 
     assert timeout_error.event.return_code != 0
     assert recorder.complete_event is not None
     assert recorder.complete_event.return_code == timeout_error.event.return_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+async def test_console_echo_mirrors_stdout(use_real_dependencies: bool, capsys) -> None:
+    config = ServerConfig()
+    manager = PluginManager()
+    manager.refresh_exports()
+    executor = ShellCommandExecutor(config, manager)
+
+    await executor.run("printf 'hello world\\n'")
+
+    captured = capsys.readouterr()
+    assert "▶ printf 'hello world\\n'" in captured.out
+    assert "hello world" in captured.out
+    assert "✔ exit code" in captured.out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+async def test_console_echo_mirrors_stderr(use_real_dependencies: bool, capsys) -> None:
+    config = ServerConfig()
+    manager = PluginManager()
+    manager.refresh_exports()
+    executor = ShellCommandExecutor(config, manager)
+
+    await executor.run(
+        "python -c \"import sys; sys.stderr.write('boom\\n')\""
+    )
+
+    captured = capsys.readouterr()
+    assert "boom" in captured.err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+async def test_console_echo_can_be_disabled(use_real_dependencies: bool, capsys) -> None:
+    config = ServerConfig()
+    manager = PluginManager()
+    manager.refresh_exports()
+    manager.set_console_echo_enabled(False)
+    executor = ShellCommandExecutor(config, manager)
+
+    await executor.run("printf 'quiet run\\n'")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

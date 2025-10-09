@@ -64,6 +64,7 @@ def create_server(
     resolved_config = config or ServerConfig.from_env()
     manager = plugin_manager or GlobalPluginManager
     manager.refresh_exports()
+    manager.set_console_echo_enabled(resolved_config.console_echo)
 
     @asynccontextmanager
     async def lifespan(_: FastMCP) -> AsyncIterator[ApplicationState]:

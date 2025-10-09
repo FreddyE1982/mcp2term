@@ -61,3 +61,13 @@ def test_ngrok_settings_parsing(use_real_dependencies: bool, tmp_path: Path) -> 
 def test_invalid_ngrok_transport_raises(use_real_dependencies: bool) -> None:
     with pytest.raises(ValueError):
         ServerConfig.from_env({"MCP2TERM_NGROK_TRANSPORTS": "sse,invalid"})
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_console_echo_toggle(use_real_dependencies: bool) -> None:
+    disabled = ServerConfig.from_env({"MCP2TERM_CONSOLE_ECHO": "0"})
+    assert disabled.console_echo is False
+    enabled = ServerConfig.from_env({"MCP2TERM_CONSOLE_ECHO": "true"})
+    assert enabled.console_echo is True
+    with pytest.raises(ValueError):
+        ServerConfig.from_env({"MCP2TERM_CONSOLE_ECHO": "maybe"})
