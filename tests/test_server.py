@@ -24,3 +24,4 @@ def test_plugin_manager_exports_include_shell_executor(use_real_dependencies: bo
     manager.refresh_exports()
     exported_names = set(manager.exports)
     assert any(name.endswith("ShellCommandExecutor") for name in exported_names)
+    assert any(name.endswith("BackpressureMonitor") for name in exported_names)

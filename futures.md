@@ -24,3 +24,7 @@
 ## Command cancellation policy plugins
 - **Purpose:** Allow administrators to customise which signals are sent for cancellation, define escalation strategies, and audit cancellation attempts.
 - **Usage:** Introduce a plugin hook invoked before `cancel_command` dispatches a signal so plugins can substitute signals, introduce grace periods, or capture metrics for observability dashboards.
+
+## Backpressure telemetry publishing
+- **Purpose:** Surface client and server buffering metrics to plugins and operators for proactive health monitoring.
+- **Usage:** Expose the backpressure monitor state via plugin callbacks and structured metrics endpoints so dashboards can highlight when queues are building up and trigger alerts.

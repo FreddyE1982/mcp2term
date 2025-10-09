@@ -6,6 +6,7 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 
 - **Full command execution** with configurable shell, working directory, environment variables, and timeouts.
 - **Live streaming** of stdout and stderr via MCP log notifications so clients observe progress as it happens.
+- **Robust chunked streaming** that handles large stdout/stderr volumes without blocking or truncation.
 - **Plugin architecture** that exposes every function, class, and variable defined in the package, enabling extensions to observe command lifecycles or inject custom behaviour.
 - **Automatic ngrok tunneling** so HTTP transports are reachable without additional manual setup.
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
@@ -32,6 +33,7 @@ The project targets Python 3.12 or newer.
 | `MCP2TERM_EXTRA_ENV` | JSON object merged into the command environment. | `{}` |
 | `MCP2TERM_PLUGINS` | Comma-separated dotted module paths to load as plugins. | *(none)* |
 | `MCP2TERM_COMMAND_TIMEOUT` | Default timeout in seconds for commands. | unlimited |
+| `MCP2TERM_STREAM_CHUNK_SIZE` | Bytes read from stdout/stderr per chunk while streaming. | `65536` |
 | `MCP2TERM_CONSOLE_ECHO` | Mirror commands and output to the server console (`true`/`false`). | `true` |
 
 ## Running the server

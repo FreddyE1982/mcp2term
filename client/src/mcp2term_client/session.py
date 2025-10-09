@@ -6,12 +6,14 @@ import threading
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
+
+from .backpressure import BackpressureMonitor, NoticeWriter
 
 _DEFAULT_STREAMABLE_HTTP_PATH = "/mcp"
 
@@ -34,6 +36,11 @@ def _normalize_streamable_http_url(url: str) -> str:
         else:
             normalized_path = path
     return urlunparse(parsed._replace(path=normalized_path))
+
+
+def _default_notice_writer(message: str) -> None:
+    sys.stderr.write(message.rstrip() + "\n")
+    sys.stderr.flush()
 
 
 @dataclass(slots=True)
@@ -124,9 +131,29 @@ class LogMessage:
 class LogStreamer:
     """Background printer for streaming log messages."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        monitor: BackpressureMonitor | None = None,
+        buffer_notice_threshold: int = 256,
+        notice_writer: NoticeWriter | None = None,
+    ) -> None:
         self._queue: "queue.SimpleQueue[LogMessage | None]" = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
+        self._notice_writer = notice_writer or _default_notice_writer
+        if monitor is None:
+            threshold = max(1, buffer_notice_threshold)
+            monitor = BackpressureMonitor(
+                name="mcp2term-client",
+                threshold=threshold,
+                recovery_threshold=max(0, threshold // 2),
+                notice_writer=self._notice_writer,
+                enter_message_factory=lambda count: (
+                    f"[mcp2term-client] Buffering {count} output message(s) from the server; display may lag."
+                ),
+                exit_message_factory=lambda: "[mcp2term-client] Output buffer drained; resuming live streaming.",
+            )
+        self._monitor = monitor
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -140,11 +167,13 @@ class LogStreamer:
         self._queue.put(None)
         self._thread.join()
         self._thread = None
+        self._monitor.reset()
 
     def submit(self, message: LogMessage) -> None:
         if not self._thread or not self._thread.is_alive():
             self.start()
         self._queue.put(message)
+        self._monitor.increment()
 
     def _run(self) -> None:
         while True:
@@ -152,10 +181,13 @@ class LogStreamer:
             if item is None:
                 break
             stream = sys.stderr if item.level.upper() in {"ERROR", "WARN", "WARNING"} else sys.stdout
-            stream.write(item.text)
-            if not item.text.endswith("\n"):
-                stream.write("\n")
-            stream.flush()
+            try:
+                stream.write(item.text)
+                if not item.text.endswith("\n"):
+                    stream.write("\n")
+                stream.flush()
+            finally:
+                self._monitor.decrement()
 
 
 @dataclass(slots=True)
@@ -163,19 +195,54 @@ class _Request:
     action: str
     payload: dict[str, Any]
     future: Future[Any]
+    track_backpressure: bool
 
 
 class RemoteMcpSession:
     """Facade around ``ClientSession`` backed by a dedicated asyncio event loop."""
 
-    def __init__(self, url: str, *, default_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        default_timeout: float | None = None,
+        notice_writer: NoticeWriter | None = None,
+        output_buffer_threshold: int = 512,
+        input_buffer_threshold: int = 32,
+    ) -> None:
         self._raw_url = url
         self._url = _normalize_streamable_http_url(url)
         self._default_timeout = default_timeout
+        self._notice_writer: NoticeWriter = notice_writer or _default_notice_writer
+        output_threshold = max(1, int(output_buffer_threshold))
+        input_threshold = max(1, int(input_buffer_threshold))
+        self._output_monitor = BackpressureMonitor(
+            name="mcp2term-client output",
+            threshold=output_threshold,
+            recovery_threshold=max(1, output_threshold // 2),
+            notice_writer=self._notice_writer,
+            enter_message_factory=lambda count: (
+                f"[mcp2term-client] Buffering {count} output message(s) from the server; display may lag."
+            ),
+            exit_message_factory=lambda: "[mcp2term-client] Output buffer drained; resuming live streaming.",
+        )
+        self._input_monitor = BackpressureMonitor(
+            name="mcp2term-client input",
+            threshold=input_threshold,
+            recovery_threshold=max(0, input_threshold // 2),
+            notice_writer=self._notice_writer,
+            enter_message_factory=lambda count: (
+                f"[mcp2term-client] Buffering {count} pending request(s) to the server; "
+                "commands will run once the connection catches up."
+            ),
+            exit_message_factory=lambda: (
+                "[mcp2term-client] Command submission queue has drained; requests are being delivered immediately."
+            ),
+        )
         self._transport_cm: Any = None
         self._transport: Any = None
         self._session: ClientSession | None = None
-        self._log_streamer = LogStreamer()
+        self._log_streamer = LogStreamer(monitor=self._output_monitor, notice_writer=self._notice_writer)
         self._started = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -215,6 +282,8 @@ class RemoteMcpSession:
         self._ensure_loop_started()
         if self._loop is None:
             raise RuntimeError("Event loop failed to start")
+        self._input_monitor.reset()
+        self._output_monitor.reset()
         self._startup_ready.clear()
         self._startup_error = None
         worker = asyncio.run_coroutine_threadsafe(self._session_worker(), self._loop)
@@ -235,7 +304,7 @@ class RemoteMcpSession:
             return
         self._log_streamer.stop()
         try:
-            self._submit_request("stop")
+            self._submit_request("stop", track_backpressure=False)
             if self._worker_future is not None:
                 with suppress(Exception):
                     self._worker_future.result()
@@ -388,6 +457,8 @@ class RemoteMcpSession:
 
             while True:
                 request = await queue_.get()
+                if request.track_backpressure:
+                    self._input_monitor.decrement()
                 if request.action == "stop":
                     request.future.set_result(None)
                     break
@@ -452,18 +523,33 @@ class RemoteMcpSession:
                 self._transport_cm = None
                 self._transport = None
             self._request_queue = None
+            self._input_monitor.reset()
 
-    def _submit_request(self, action: str, wait: bool = True, **payload: Any) -> Any | Future[Any]:
+    def _submit_request(
+        self,
+        action: str,
+        wait: bool = True,
+        *,
+        track_backpressure: bool = True,
+        **payload: Any,
+    ) -> Any | Future[Any]:
         if self._loop is None or self._request_queue is None:
             raise RuntimeError("RemoteMcpSession used before start()")
         future: Future[Any] = Future()
-        request = _Request(action=action, payload=payload, future=future)
+        request = _Request(
+            action=action,
+            payload=payload,
+            future=future,
+            track_backpressure=track_backpressure,
+        )
 
         def _enqueue() -> None:
             if self._request_queue is None:
                 future.set_exception(RuntimeError("RemoteMcpSession is shutting down"))
                 return
             self._request_queue.put_nowait(request)
+            if track_backpressure:
+                self._input_monitor.increment()
 
         self._loop.call_soon_threadsafe(_enqueue)
         if wait:
