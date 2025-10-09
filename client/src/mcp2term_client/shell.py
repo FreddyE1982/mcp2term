@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import shlex
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .input import InputReader, TerminalInputReader
 from .session import RemoteMcpSession
 from .state import RemoteShellState
 
@@ -23,6 +25,7 @@ class RemoteCommandProcessor:
     status_callback: Callable[[int], None] = field(default=lambda _status: None)
     output_writer: Callable[[str], None] = print
     error_writer: Callable[[str], None] = lambda message: print(message, file=sys.stderr)
+    input_reader_factory: Callable[[], InputReader] | None = None
     current_command_id: str | None = field(default=None, init=False, repr=False)
 
     def execute(self, raw_command: str) -> int:
@@ -72,32 +75,30 @@ class RemoteCommandProcessor:
             ephemeral_environment=assignments,
         )
         self.current_command_id = command_id
-        response: "CommandResponse" | None = None
+        reader = self._create_input_reader()
         try:
-            while response is None:
+            while not future.done():
                 try:
-                    response = future.result()
+                    forwarded = self._forward_interactive_input(command_id, reader)
                 except KeyboardInterrupt:
-                    try:
-                        cancel_response = self.session.cancel_command(command_id)
-                    except Exception as cancel_exc:
-                        self.error_writer(f"cancel failed: {cancel_exc}")
-                        continue
-                    if cancel_response.delivered:
-                        signal_label = cancel_response.signal_name or str(cancel_response.signal)
-                        self.error_writer(
-                            f"Sent {signal_label} to remote command {command_id}."
-                        )
-                    else:
-                        self.error_writer("No running remote command to interrupt.")
+                    self._handle_interrupt(command_id)
+                    continue
                 except Exception as exc:
                     self.error_writer(str(exc))
                     self.status_callback(1)
                     return 1
+                if not forwarded:
+                    time.sleep(0.05)
+            response = future.result()
+        except Exception as exc:
+            self.error_writer(str(exc))
+            self.status_callback(1)
+            return 1
         finally:
+            reader.close()
             self.current_command_id = None
-        assert response is not None
 
+        assert response is not None
         self.state.cwd = response.working_directory or self.state.cwd
         self.status_callback(response.return_code)
         if response.timed_out:
@@ -151,6 +152,37 @@ class RemoteCommandProcessor:
             remainder.extend(iterator)
             break
         return assignments, remainder
+
+    def _create_input_reader(self) -> InputReader:
+        if self.input_reader_factory is not None:
+            return self.input_reader_factory()
+        return TerminalInputReader()
+
+    def _forward_interactive_input(self, command_id: str, reader: InputReader) -> bool:
+        forwarded = False
+        for chunk in reader.read(0.1):
+            forwarded = True
+            if chunk.data:
+                if not self.session.send_stdin(command_id, chunk.data):
+                    self.error_writer("Remote command is no longer accepting input.")
+                    return True
+            if chunk.eof:
+                if not self.session.send_stdin(command_id, "", eof=True):
+                    self.error_writer("Failed to signal EOF to remote command.")
+                return True
+        return forwarded
+
+    def _handle_interrupt(self, command_id: str) -> None:
+        try:
+            cancel_response = self.session.cancel_command(command_id)
+        except Exception as cancel_exc:
+            self.error_writer(f"cancel failed: {cancel_exc}")
+            return
+        if cancel_response.delivered:
+            signal_label = cancel_response.signal_name or str(cancel_response.signal)
+            self.error_writer(f"Sent {signal_label} to remote command {command_id}.")
+        else:
+            self.error_writer("No running remote command to interrupt.")
 
 
 class XonshShellRunner:

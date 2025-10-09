@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ import anyio
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from mcp2term_client.input import InputChunk, QueueInputReader
 from mcp2term_client.session import RemoteMcpSession, RemoteMcpSessionError
 from mcp2term_client.shell import RemoteCommandProcessor
 from mcp2term_client.state import RemoteShellState
@@ -229,3 +231,96 @@ def test_remote_session_reports_diagnostics_for_not_found(use_real_dependencies:
         assert "HTTP 404" in message
         assert url in message
         session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_streams_stdin(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            cwd = session.resolve_working_directory()
+            command_id, future = session.run_command_async(
+                "python -c \"import sys; data = sys.stdin.read(); print(data.strip())\"",
+                working_directory=cwd,
+                environment=None,
+            )
+            delivered = False
+            for _ in range(50):
+                delivered = session.send_stdin(command_id, "hello remote\n")
+                if delivered:
+                    break
+                time.sleep(0.1)
+            assert delivered, "Failed to deliver stdin to remote command"
+            eof_delivered = False
+            for _ in range(50):
+                eof_delivered = session.send_stdin(command_id, "", eof=True)
+                if eof_delivered:
+                    break
+                time.sleep(0.1)
+            assert eof_delivered, "Failed to deliver EOF to remote command"
+            response = future.result(timeout=10.0)
+        finally:
+            session.close()
+    assert "hello remote" in response.stdout
+    assert response.return_code == 0
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_processor_handles_interactive_cli(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            state = RemoteShellState(cwd=session.resolve_working_directory())
+            statuses: list[int] = []
+            errors: list[str] = []
+            input_queue: "queue.Queue[InputChunk]" = queue.Queue()
+            exit_code = -1
+            verify_response = None
+
+            def reader_factory() -> QueueInputReader:
+                return QueueInputReader(input_queue)
+
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: None,
+                error_writer=errors.append,
+                input_reader_factory=reader_factory,
+            )
+
+            def feed() -> None:
+                time.sleep(0.5)
+                input_queue.put(InputChunk(data="from pathlib import Path\n"))
+                time.sleep(0.2)
+                input_queue.put(
+                    InputChunk(data="Path('interactive_flag.txt').write_text('client!')\n")
+                )
+                time.sleep(0.2)
+                input_queue.put(InputChunk(data="exit()\n"))
+
+            feeder = Thread(target=feed, daemon=True)
+            feeder.start()
+            exit_code = processor.execute("python")
+            feeder.join(timeout=5)
+
+            verify_response = session.run_command(
+                "python -c \"import pathlib; print(pathlib.Path('interactive_flag.txt').read_text())\"",
+                working_directory=state.cwd,
+                environment=None,
+            )
+            session.run_command(
+                "python -c \"import pathlib; pathlib.Path('interactive_flag.txt').unlink(missing_ok=True)\"",
+                working_directory=state.cwd,
+                environment=None,
+            )
+        finally:
+            session.close()
+
+    assert exit_code == 0
+    assert statuses and statuses[-1] == 0
+    assert not errors
+    assert verify_response is not None
+    assert "client!" in verify_response.stdout

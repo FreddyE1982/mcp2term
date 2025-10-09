@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import logging
 import signal
 from asyncio.subprocess import Process
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from .streaming import (
     CommandStartEvent,
     utcnow,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -116,6 +120,7 @@ class ShellCommandExecutor:
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
                     executable=self.config.shell_path,
@@ -244,3 +249,41 @@ class ShellCommandExecutor:
         """Send ``SIGINT`` to the running command when present."""
 
         return await self.send_signal(command_id, signal.SIGINT)
+
+    async def send_stdin(self, command_id: str, data: str, *, eof: bool = False) -> bool:
+        """Deliver ``data`` to the stdin pipe for the running command.
+
+        Parameters
+        ----------
+        command_id:
+            Identifier of the running command.
+        data:
+            Text to forward to the process stdin. An empty string is ignored
+            unless ``eof`` is True.
+        eof:
+            When True, closes the stdin stream after writing ``data``.
+        """
+
+        async with self._running_lock:
+            process = self._running_commands.get(command_id)
+
+        if process is None:
+            return False
+
+        writer = process.stdin
+        if writer is None or writer.is_closing():
+            return False
+
+        try:
+            if data:
+                writer.write(data.encode("utf-8"))
+                await writer.drain()
+            if eof:
+                try:
+                    writer.write_eof()
+                except (AttributeError, RuntimeError, ValueError):
+                    writer.close()
+            return True
+        except (BrokenPipeError, ConnectionResetError, RuntimeError, ValueError) as exc:
+            logger.warning("Failed to deliver stdin to command %s: %s", command_id, exc)
+            return False
