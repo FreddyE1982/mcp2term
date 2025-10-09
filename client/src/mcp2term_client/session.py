@@ -7,9 +7,32 @@ from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
+
+_DEFAULT_STREAMABLE_HTTP_PATH = "/mcp"
+
+
+def _normalize_streamable_http_url(url: str) -> str:
+    """Ensure the URL points at the Streamable HTTP endpoint."""
+
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("Streamable HTTP URL must include a scheme and host")
+    path = parsed.path or ""
+    if path.rstrip("/") == "":
+        normalized_path = _DEFAULT_STREAMABLE_HTTP_PATH
+    else:
+        stripped = path.rstrip("/")
+        if not stripped.startswith("/"):
+            stripped = "/" + stripped
+        if stripped.endswith(_DEFAULT_STREAMABLE_HTTP_PATH):
+            normalized_path = stripped
+        else:
+            normalized_path = path
+    return urlunparse(parsed._replace(path=normalized_path))
 
 
 @dataclass(slots=True)
@@ -111,7 +134,8 @@ class RemoteMcpSession:
     """Facade around ``ClientSession`` backed by a dedicated asyncio event loop."""
 
     def __init__(self, url: str, *, default_timeout: float | None = None) -> None:
-        self._url = url
+        self._raw_url = url
+        self._url = _normalize_streamable_http_url(url)
         self._default_timeout = default_timeout
         self._transport_cm: Any = None
         self._transport: Any = None
@@ -130,6 +154,18 @@ class RemoteMcpSession:
     @property
     def default_timeout(self) -> float | None:
         return self._default_timeout
+
+    @property
+    def endpoint_url(self) -> str:
+        """Normalized Streamable HTTP endpoint used for the MCP session."""
+
+        return self._url
+
+    @property
+    def raw_url(self) -> str:
+        """Original URL provided by the user before normalization."""
+
+        return self._raw_url
 
     def start(self) -> None:
         if self._started:

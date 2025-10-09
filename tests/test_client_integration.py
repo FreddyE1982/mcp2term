@@ -145,3 +145,23 @@ def test_remote_processor_manages_state(use_real_dependencies: bool) -> None:
             assert state.cwd == "/"
         finally:
             session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_normalizes_root_url(use_real_dependencies: bool) -> None:
+    with running_server() as full_url:
+        base_url = full_url.rsplit("/mcp", 1)[0]
+        session = RemoteMcpSession(base_url)
+        session.start()
+        try:
+            assert session.endpoint_url.endswith("/mcp")
+            cwd = session.resolve_working_directory()
+            response = session.run_command(
+                "echo normalized",
+                working_directory=cwd,
+                environment=None,
+            )
+        finally:
+            session.close()
+    assert "normalized" in response.stdout
+    assert response.return_code == 0
