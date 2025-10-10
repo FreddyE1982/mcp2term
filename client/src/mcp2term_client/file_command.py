@@ -1,4 +1,4 @@
-"""Parsing utilities for the client-side ``mcp.file`` command."""
+"""Parsing utilities for the client-side ``filetool`` command."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ _ALLOWED_OPERATIONS = (
 
 
 class FileCommandError(ValueError):
-    """Base exception raised when parsing `mcp.file` arguments."""
+    """Base exception raised when parsing `filetool` arguments."""
 
 
 class FileCommandHelp(FileCommandError):
@@ -52,7 +52,7 @@ class FileCommandParseError(FileCommandError):
 
 @dataclass(slots=True)
 class ManageFileCommand:
-    """Represents a fully parsed ``mcp.file`` invocation."""
+    """Represents a fully parsed ``filetool`` invocation."""
 
     operation: str
     path: str
@@ -88,7 +88,7 @@ def _create_parser() -> _ArgumentParser:
   locate   Report line numbers containing the provided search text.
 """
     parser = _ArgumentParser(
-        prog="mcp.file",
+        prog="filetool",
         description=description,
         epilog=epilog,
         add_help=False,
@@ -166,13 +166,13 @@ def _create_parser() -> _ArgumentParser:
 
 
 def render_manage_file_help() -> str:
-    """Return the formatted help text for the ``mcp.file`` command."""
+    """Return the formatted help text for the ``filetool`` command."""
 
     parser = _create_parser()
     help_text = parser.format_help().rstrip()
     if help_text:
         help_text += "\n"
-    help_text += "Use `mcp.file --help` to display this message."
+    help_text += "Use `filetool --help` to display this message."
     return help_text
 
 

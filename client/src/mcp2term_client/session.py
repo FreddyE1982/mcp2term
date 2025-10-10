@@ -751,7 +751,7 @@ class RemoteMcpSession:
             operation = str(operation_raw) if operation_raw is not None else "manage_file"
             encoding_raw = request.payload.get("encoding", "utf-8")
             encoding = str(encoding_raw) if encoding_raw is not None else "utf-8"
-            message = f"Failed to execute mcp.file {operation} on {path or 'target'}: {error}"
+            message = f"Failed to execute filetool {operation} on {path or 'target'}: {error}"
             response = FileOperationResponse(
                 path=path,
                 operation=operation,

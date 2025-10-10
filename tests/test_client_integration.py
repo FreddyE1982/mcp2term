@@ -414,7 +414,7 @@ def test_manage_file_command_executes_remote_operations(
             outputs.clear()
             errors.clear()
             create_status = processor.execute(
-                f"mcp.file create {relative_path} --content alpha --create-parents --overwrite"
+                f"filetool create {relative_path} --content alpha --create-parents --overwrite"
             )
             assert create_status == 0
             assert statuses and statuses[-1] == 0
@@ -423,7 +423,7 @@ def test_manage_file_command_executes_remote_operations(
 
             outputs.clear()
             errors.clear()
-            print_status = processor.execute(f"mcp.file print {relative_path}")
+            print_status = processor.execute(f"filetool print {relative_path}")
             assert print_status == 0
             assert statuses and statuses[-1] == 0
             assert not errors
@@ -432,7 +432,7 @@ def test_manage_file_command_executes_remote_operations(
             outputs.clear()
             errors.clear()
             locate_status = processor.execute(
-                f"mcp.file locate {relative_path} --content alpha"
+                f"filetool locate {relative_path} --content alpha"
             )
             assert locate_status == 0
             assert statuses and statuses[-1] == 0
