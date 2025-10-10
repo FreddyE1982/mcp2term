@@ -2,6 +2,14 @@
 
 from .backpressure import BackpressureMonitor
 from .input import InputChunk, InputReader, QueueInputReader, TerminalInputReader
+from .intro import (
+    IntroContext,
+    IntroSection,
+    IntroSectionProvider,
+    iter_intro_sections,
+    register_intro_section_provider,
+    render_intro_message,
+)
 from .session import (
     CancelCommandResponse,
     CommandResponse,
@@ -19,7 +27,13 @@ __all__ = [
     "SendInputResponse",
     "InputChunk",
     "InputReader",
+    "IntroContext",
+    "IntroSection",
+    "IntroSectionProvider",
     "QueueInputReader",
+    "register_intro_section_provider",
+    "render_intro_message",
+    "iter_intro_sections",
     "TerminalInputReader",
     "RemoteCommandProcessor",
     "RemoteMcpSession",

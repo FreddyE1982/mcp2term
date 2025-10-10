@@ -48,3 +48,7 @@
 ## File operation conflict detection
 - **Purpose:** Detect and prevent conflicting edits when multiple clients edit the same file concurrently through the MCP tools.
 - **Usage:** Introduce optimistic concurrency controls to `FileEditor` that compute content hashes prior to mutation and verify they still match when applying edits. Expose the checksums through `FileOperationResult` so plugins and clients can warn operators about potential conflicts and offer auto-merge strategies.
+
+## Client onboarding banner plugins
+- **Purpose:** Allow deployments to tailor the introductory message shown after connecting, injecting organisation-specific guidance, compliance prompts, or links to documentation without editing the core client.
+- **Usage:** Extend the intro banner provider registry with plugin-discovered providers that can append new sections or rewrite existing ones. Plugins could surface mandatory security reminders, company hotkeys, or dynamic status indicators fetched from monitoring APIs while preserving the default capability overview for new operators.
