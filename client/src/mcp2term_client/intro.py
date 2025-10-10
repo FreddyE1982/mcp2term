@@ -139,7 +139,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "`write` replaces the entire file contents, and `append` safely extends the end of a file.",
         "`insert --line N` adds new text before the specified line, while `replace`/`delete` operate over line ranges via `--start-line` and `--end-line`.",
         "`print` streams selected line ranges back to the terminal, perfect for quick inspections without an editor.",
-        "`locate --content "needle"` returns the remote line numbers that match your search text for faster navigation.",
+        "`locate --content \"needle\"` returns the remote line numbers that match your search text for faster navigation.",
         "All file edits emit structured audit events through the plugin registry so operators can observe and extend behaviour.",
     ]
 
