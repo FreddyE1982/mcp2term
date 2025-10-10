@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager
@@ -438,6 +439,46 @@ def test_manage_file_command_executes_remote_operations(
             assert statuses and statuses[-1] == 0
             assert not errors
             assert any("Line" in line for line in outputs)
+
+            patch_payload = (
+                f"--- a/{relative_path}\n"
+                f"+++ b/{relative_path}\n"
+                "@@ -1 +1 @@\n"
+                "-alpha\n"
+                "+zulu\n"
+            )
+            patch_file = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", delete=False
+            )
+            try:
+                patch_file.write(patch_payload)
+                patch_file.flush()
+                patch_path = patch_file.name
+            finally:
+                patch_file.close()
+
+            try:
+                outputs.clear()
+                errors.clear()
+                patch_status = processor.execute(
+                    f"filetool patch {relative_path} --content-from-file {shlex.quote(patch_path)}"
+                )
+                assert patch_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("Applied patch" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                print_after_patch = processor.execute(
+                    f"filetool print {relative_path}"
+                )
+                assert print_after_patch == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("zulu" in line for line in outputs)
+            finally:
+                os.unlink(patch_path)
         finally:
             cleanup_state = state
             try:

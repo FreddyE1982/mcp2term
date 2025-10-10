@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from pathlib import Path
 
 
@@ -53,6 +54,34 @@ class FileOperationResult:
         if self.line_numbers:
             payload["line_numbers"] = list(self.line_numbers)
         return payload
+
+
+@dataclass(slots=True)
+class UnifiedDiffLine:
+    """Represents a single line inside a unified diff hunk."""
+
+    tag: str
+    text: str
+
+
+@dataclass(slots=True)
+class UnifiedDiffHunk:
+    """A single hunk within a unified diff file patch."""
+
+    old_start: int
+    old_length: int
+    new_start: int
+    new_length: int
+    lines: tuple[UnifiedDiffLine, ...]
+
+
+@dataclass(slots=True)
+class UnifiedDiffFilePatch:
+    """Unified diff patch data for a single file."""
+
+    old_path: str | None
+    new_path: str | None
+    hunks: tuple[UnifiedDiffHunk, ...]
 
 
 class FileEditor:
@@ -145,6 +174,66 @@ class FileEditor:
             encoding=encoding,
             message=f"Appended to {target}",
             content=new_text,
+        )
+
+    def apply_patch(
+        self,
+        raw_path: str,
+        *,
+        patch_text: str,
+        encoding: str,
+    ) -> FileOperationResult:
+        """Apply a unified diff patch to an existing file."""
+
+        if not patch_text or patch_text.strip() == "":
+            raise FileOperationError("Patch content must not be empty")
+
+        target = self.resolve_path(raw_path)
+        if not target.exists():
+            raise FileOperationError(f"File does not exist: {target}")
+
+        original_text = target.read_text(encoding=encoding)
+        parsed_patch = _parse_unified_diff(patch_text)
+
+        patch_paths = {
+            entry
+            for entry in (
+                _normalise_patch_path(
+                    parsed_patch.old_path, base_directory=self._base_directory
+                ),
+                _normalise_patch_path(
+                    parsed_patch.new_path, base_directory=self._base_directory
+                ),
+            )
+            if entry is not None
+        }
+
+        if patch_paths and target not in patch_paths:
+            raise FileOperationError(
+                "Patch targets a different file than requested operation",
+            )
+
+        updated_text, applied_hunks = _apply_unified_patch(
+            original_text,
+            parsed_patch,
+        )
+
+        target.write_text(updated_text, encoding=encoding)
+
+        message = (
+            "Patch applied with no changes"
+            if updated_text == original_text
+            else f"Applied patch with {applied_hunks} hunk(s)"
+        )
+
+        return FileOperationResult(
+            path=target,
+            operation="patch",
+            success=True,
+            changed=updated_text != original_text,
+            encoding=encoding,
+            message=message,
+            content=updated_text,
         )
 
     def insert_lines(
@@ -367,9 +456,191 @@ class FileEditor:
         target.write_text(text, encoding=encoding)
 
 
+_HUNK_HEADER_RE = re.compile(
+    r"@@ -(?P<old_start>\d+)(?:,(?P<old_length>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_length>\d+))? @@"
+)
+
+
+def _parse_unified_diff(patch_text: str) -> UnifiedDiffFilePatch:
+    """Parse ``patch_text`` into a :class:`UnifiedDiffFilePatch`."""
+
+    lines = patch_text.splitlines(keepends=True)
+    index = 0
+    total = len(lines)
+
+    while index < total and not lines[index].startswith("--- "):
+        index += 1
+    if index >= total:
+        raise FileOperationError("Patch is missing the --- file header")
+    old_path = lines[index][4:].strip() or None
+    index += 1
+    if index >= total or not lines[index].startswith("+++ "):
+        raise FileOperationError("Patch is missing the +++ file header")
+    new_path = lines[index][4:].strip() or None
+    index += 1
+
+    hunks: list[UnifiedDiffHunk] = []
+    while index < total:
+        line = lines[index]
+        if line.startswith("diff ") or line.startswith("--- "):
+            raise FileOperationError(
+                "Patch contains multiple file sections; submit them individually",
+            )
+        if not line.startswith("@@ "):
+            if line.strip() == "":
+                index += 1
+                continue
+            raise FileOperationError(
+                f"Unexpected line in patch: {line.rstrip()}"
+            )
+        header = line.strip()
+        match = _HUNK_HEADER_RE.match(header)
+        if not match:
+            raise FileOperationError(f"Invalid hunk header: {header}")
+
+        old_start = int(match.group("old_start"))
+        old_length = int(match.group("old_length") or "1")
+        new_start = int(match.group("new_start"))
+        new_length = int(match.group("new_length") or "1")
+        index += 1
+
+        hunk_lines: list[UnifiedDiffLine] = []
+        while index < total:
+            entry = lines[index]
+            if entry.startswith("@@ "):
+                break
+            if entry.startswith("diff ") or entry.startswith("--- "):
+                raise FileOperationError(
+                    "Patch contains multiple file sections; submit them individually",
+                )
+            if entry.startswith("\\ "):
+                if not hunk_lines:
+                    raise FileOperationError(
+                        "No newline marker appears before any hunk lines",
+                    )
+                previous = hunk_lines[-1]
+                if previous.text.endswith("\n"):
+                    hunk_lines[-1] = UnifiedDiffLine(previous.tag, previous.text[:-1])
+                index += 1
+                continue
+            if not entry:
+                index += 1
+                continue
+            if entry[0] not in " +-":
+                raise FileOperationError(
+                    f"Unsupported patch line prefix: {entry[0]!r}",
+                )
+            prefix = entry[0]
+            text = entry[1:]
+            hunk_lines.append(UnifiedDiffLine(prefix, text))
+            index += 1
+
+        hunk = UnifiedDiffHunk(
+            old_start=old_start,
+            old_length=old_length,
+            new_start=new_start,
+            new_length=new_length,
+            lines=tuple(hunk_lines),
+        )
+        _validate_hunk_lengths(hunk)
+        hunks.append(hunk)
+
+    if not hunks:
+        raise FileOperationError("Patch does not contain any hunks")
+
+    return UnifiedDiffFilePatch(
+        old_path=old_path,
+        new_path=new_path,
+        hunks=tuple(hunks),
+    )
+
+
+def _validate_hunk_lengths(hunk: UnifiedDiffHunk) -> None:
+    removed = sum(1 for line in hunk.lines if line.tag != "+")
+    added = sum(1 for line in hunk.lines if line.tag != "-")
+    if removed != hunk.old_length:
+        raise FileOperationError(
+            "Patch hunk removal count does not match header",
+        )
+    if added != hunk.new_length:
+        raise FileOperationError(
+            "Patch hunk addition count does not match header",
+        )
+
+
+def _normalise_patch_path(
+    path: str | None,
+    *,
+    base_directory: Path | None = None,
+) -> Path | None:
+    if path is None:
+        return None
+    cleaned = path.strip()
+    if not cleaned or cleaned in {"/dev/null", "null"}:
+        return None
+    cleaned = cleaned.split("\t", 1)[0]
+    cleaned = cleaned.strip('"')
+    if cleaned.startswith("a/") or cleaned.startswith("b/"):
+        cleaned = cleaned[2:]
+    candidate = Path(cleaned)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    base = base_directory if base_directory is not None else Path.cwd()
+    return (base / candidate).resolve()
+
+
+def _apply_unified_patch(
+    original_text: str,
+    patch: UnifiedDiffFilePatch,
+) -> tuple[str, int]:
+    original_lines = original_text.splitlines(keepends=True)
+    result_lines: list[str] = []
+    index = 0
+
+    for hunk in patch.hunks:
+        start_index = max(hunk.old_start - 1, 0)
+        if start_index > len(original_lines):
+            raise FileOperationError("Patch hunk starts beyond end of file")
+        if start_index < index:
+            raise FileOperationError("Patch hunks overlap in the target file")
+
+        result_lines.extend(original_lines[index:start_index])
+        index = start_index
+
+        for line in hunk.lines:
+            if line.tag == " ":
+                if index >= len(original_lines):
+                    raise FileOperationError("Patch context extends past end of file")
+                if original_lines[index] != line.text:
+                    raise FileOperationError(
+                        "Patch context does not match file contents",
+                    )
+                result_lines.append(original_lines[index])
+                index += 1
+            elif line.tag == "-":
+                if index >= len(original_lines):
+                    raise FileOperationError("Patch deletion extends past end of file")
+                if original_lines[index] != line.text:
+                    raise FileOperationError(
+                        "Patch deletion does not match file contents",
+                    )
+                index += 1
+            elif line.tag == "+":
+                result_lines.append(line.text)
+            else:
+                raise FileOperationError(f"Unsupported patch line tag: {line.tag}")
+
+    result_lines.extend(original_lines[index:])
+    return "".join(result_lines), len(patch.hunks)
+
+
 __all__ = [
     "FileEditor",
     "FileLine",
     "FileOperationError",
     "FileOperationResult",
+    "UnifiedDiffFilePatch",
+    "UnifiedDiffHunk",
+    "UnifiedDiffLine",
 ]

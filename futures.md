@@ -43,7 +43,7 @@
 
 ## File patch templating macros
 - **Purpose:** Layer higher-level diffing and templating workflows on top of the existing `manage_file` tool so complex multi-file refactors can be performed reproducibly.
-- **Usage:** Extend the file management subsystem with a patch application API that accepts unified diffs or parameterised templates. Provide plugin hooks to validate patches, inject pre-commit checks, and broadcast file mutation events to auditing backends.
+- **Usage:** Build on the unified diff support exposed via the new `patch` operation by layering templating DSLs, validation hooks, and preview tooling. Provide plugin hooks to validate patches, inject pre-commit checks, and broadcast file mutation events to auditing backends.
 
 ## File operation conflict detection
 - **Purpose:** Detect and prevent conflicting edits when multiple clients edit the same file concurrently through the MCP tools.
