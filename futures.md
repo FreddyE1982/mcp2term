@@ -40,3 +40,11 @@
 ## Warning analytics dashboards
 - **Purpose:** Capture and aggregate warning events emitted by the server and client so operators can monitor recurring failure patterns, correlate them with infrastructure incidents, and produce proactive alerts.
 - **Usage:** Implement a plugin using the new warning listener hooks to forward warning metadata into an observability pipeline (for example, Prometheus or OpenTelemetry). Provide client-side adapters that subscribe to notice writers, batching warnings for long-term storage while keeping the interactive terminal output readable. Document configuration for routing warnings to dashboards and setting thresholds for alerting.
+
+## File patch templating macros
+- **Purpose:** Layer higher-level diffing and templating workflows on top of the existing `manage_file` tool so complex multi-file refactors can be performed reproducibly.
+- **Usage:** Extend the file management subsystem with a patch application API that accepts unified diffs or parameterised templates. Provide plugin hooks to validate patches, inject pre-commit checks, and broadcast file mutation events to auditing backends.
+
+## File operation conflict detection
+- **Purpose:** Detect and prevent conflicting edits when multiple clients edit the same file concurrently through the MCP tools.
+- **Usage:** Introduce optimistic concurrency controls to `FileEditor` that compute content hashes prior to mutation and verify they still match when applying edits. Expose the checksums through `FileOperationResult` so plugins and clients can warn operators about potential conflicts and offer auto-merge strategies.

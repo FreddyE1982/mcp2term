@@ -10,6 +10,7 @@ import traceback
 import pkgutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType
 from typing import (
     Any,
@@ -22,6 +23,7 @@ from typing import (
     runtime_checkable,
 )
 
+from .files import FileOperationResult
 from .streaming import (
     CommandCompleteEvent,
     CommandOutputChunk,
@@ -74,6 +76,30 @@ class ServerWarningListener(Protocol):
     """Protocol for plugins interested in server warning notifications."""
 
     async def on_server_warning(self, event: ServerWarningEvent) -> None: ...
+
+
+@dataclass(slots=True)
+class FileOperationEvent:
+    """Event describing the outcome of a file management operation."""
+
+    raw_path: str
+    operation: str
+    arguments: Mapping[str, Any]
+    result: FileOperationResult
+    warning: str | None = None
+
+    @property
+    def path(self) -> Path:
+        """Return the resolved file path associated with the operation."""
+
+        return self.result.path
+
+
+@runtime_checkable
+class FileOperationListener(Protocol):
+    """Protocol for plugins observing file management events."""
+
+    async def on_file_operation(self, event: FileOperationEvent) -> None: ...
 
 
 class ConsoleEchoListener(CommandStreamListener):
@@ -151,6 +177,12 @@ class PluginRegistry:
         logger.debug("Registering server warning listener %s", listener)
         self._manager.warning_listeners.append(listener)
 
+    def register_file_operation_listener(self, listener: FileOperationListener) -> None:
+        if not isinstance(listener, FileOperationListener):  # type: ignore[arg-type]
+            raise TypeError("Listener must implement FileOperationListener protocol")
+        logger.debug("Registering file operation listener %s", listener)
+        self._manager.file_operation_listeners.append(listener)
+
 
 @dataclass(slots=True)
 class PluginManager:
@@ -159,6 +191,7 @@ class PluginManager:
     exports: MutableMapping[str, Any] = field(default_factory=dict)
     command_listeners: list[CommandStreamListener] = field(default_factory=list)
     warning_listeners: list[ServerWarningListener] = field(default_factory=list)
+    file_operation_listeners: list[FileOperationListener] = field(default_factory=list)
     loaded_plugins: dict[str, PluginProtocol] = field(default_factory=dict)
     _console_echo_listener: ConsoleEchoListener | None = field(
         default=None, init=False, repr=False
@@ -332,6 +365,9 @@ class PluginManager:
 
     async def emit_server_warning(self, event: ServerWarningEvent) -> None:
         await self._broadcast(self.warning_listeners, "on_server_warning", event)
+
+    async def emit_file_operation(self, event: FileOperationEvent) -> None:
+        await self._broadcast(self.file_operation_listeners, "on_file_operation", event)
 
     async def _broadcast(
         self,
