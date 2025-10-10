@@ -14,6 +14,7 @@ stdout/stderr stream back in real time.
 - Interactive stdin streaming so REPLs like `python` behave just like a local terminal session.
 - Forward `Ctrl+C` interrupts to the remote server, delivering configurable signals via the MCP `cancel_command` tool.
 - Friendly prompt that shows the remote working directory.
+- Inline file editing commands understand escaped newlines and tabs (`\n`, `\t`), making it easy to submit multi-line patches from shells that only accept single-line input.
 - Backpressure detection that reports when the client buffers output or pending commands so you know when to wait for catch-up.
 - Automatic diagnostics that explain connection failures, including HTTP status codes and corrective suggestions when the remote
   endpoint is unreachable.

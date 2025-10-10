@@ -445,7 +445,9 @@ def test_manage_file_command_executes_remote_operations(
                 f"+++ b/{relative_path}\n"
                 "@@ -1 +1 @@\n"
                 "-alpha\n"
+                "\\ No newline at end of file\n"
                 "+zulu\n"
+                "\\ No newline at end of file\n"
             )
             patch_file = tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", delete=False
@@ -477,6 +479,35 @@ def test_manage_file_command_executes_remote_operations(
                 assert statuses and statuses[-1] == 0
                 assert not errors
                 assert any("zulu" in line for line in outputs)
+
+                inline_patch_payload = (
+                    f"--- a/{relative_path}\\n"
+                    f"+++ b/{relative_path}\\n"
+                    "@@ -1 +1 @@\\n"
+                    "-zulu\\n"
+                    "\\ No newline at end of file\\n"
+                    "+inline-escape\\n"
+                    "\\ No newline at end of file\\n"
+                )
+                outputs.clear()
+                errors.clear()
+                inline_patch_status = processor.execute(
+                    f"filetool patch {relative_path} --content {shlex.quote(inline_patch_payload)}"
+                )
+                assert inline_patch_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("Applied patch" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                print_after_inline = processor.execute(
+                    f"filetool print {relative_path}"
+                )
+                assert print_after_inline == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("inline-escape" in line for line in outputs)
             finally:
                 os.unlink(patch_path)
         finally:
