@@ -71,7 +71,7 @@ class RemoteCommandProcessor:
             self.state.update_environment(assignments)
             return handler(remainder[1:], assignments)
 
-        if command_name == "mcp.file":
+        if command_name == "filetool":
             return self._handle_manage_file_command(remainder[1:], assignments)
 
         return self._execute_remote_command(remainder, assignments)
@@ -169,11 +169,11 @@ class RemoteCommandProcessor:
                 for line in usage.split("\n"):
                     if line:
                         self.error_writer(line)
-            self.error_writer(f"mcp.file: {parse_exc}")
+            self.error_writer(f"filetool: {parse_exc}")
             self.status_callback(2)
             return 2
         except Exception as exc:
-            self.error_writer(f"mcp.file: {exc}")
+            self.error_writer(f"filetool: {exc}")
             self.status_callback(1)
             return 1
 
@@ -191,7 +191,7 @@ class RemoteCommandProcessor:
                 create_if_missing=command.create_if_missing,
             )
         except Exception as exc:
-            self.error_writer(f"mcp.file: {exc}")
+            self.error_writer(f"filetool: {exc}")
             self.status_callback(1)
             return 1
 

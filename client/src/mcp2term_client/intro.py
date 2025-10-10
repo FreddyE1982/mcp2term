@@ -134,7 +134,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
     ]
 
     file_operations: list[str] = [
-        "Use `mcp.file <operation> <path> [options]` to invoke the server's manage_file tool without leaving the shell.",
+        "Use `filetool <operation> <path> [options]` to invoke the server's manage_file tool without leaving the shell.",
         "`create` makes a brand new file; combine with `--create-parents` or `--overwrite` as needed.",
         "`write` replaces the entire file contents, and `append` safely extends the end of a file.",
         "`insert --line N` adds new text before the specified line, while `replace`/`delete` operate over line ranges via `--start-line` and `--end-line`.",
