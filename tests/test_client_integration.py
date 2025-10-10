@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import queue
 import subprocess
 import sys
 import time
+from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -17,7 +19,11 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from mcp2term_client.input import InputChunk, QueueInputReader
-from mcp2term_client.session import RemoteMcpSession, RemoteMcpSessionError
+from mcp2term_client.session import (
+    CommandResponse,
+    RemoteMcpSession,
+    RemoteMcpSessionError,
+)
 from mcp2term_client.shell import RemoteCommandProcessor
 from mcp2term_client.state import RemoteShellState
 
@@ -324,3 +330,26 @@ def test_remote_processor_handles_interactive_cli(use_real_dependencies: bool) -
     assert not errors
     assert verify_response is not None
     assert "client!" in verify_response.stdout
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_close_cancels_active_requests(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        future: Future[CommandResponse] | None = None
+        try:
+            cwd = session.resolve_working_directory()
+            _, future = session.run_command_async(
+                "python -c 'import time; time.sleep(10)'",
+                working_directory=cwd,
+                environment=None,
+            )
+            time.sleep(0.5)
+        finally:
+            session.close()
+
+    assert future is not None
+    assert future.cancelled()
+    with pytest.raises(CancelledError):
+        future.result(timeout=0.1)

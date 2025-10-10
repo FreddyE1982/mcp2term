@@ -561,10 +561,19 @@ class RemoteMcpSession:
                             future: Future[Any],
                         ) -> None:
                             self._active_tasks.discard(finished)
+                            if finished.cancelled():
+                                if not future.cancelled():
+                                    future.cancel()
+                                return
                             try:
                                 result = finished.result()
+                            except asyncio.CancelledError as cancel_error:
+                                if not future.cancelled():
+                                    future.set_exception(cancel_error)
                             except Exception as error:
                                 future.set_exception(error)
+                            except BaseException:
+                                raise
                             else:
                                 future.set_result(result)
 
