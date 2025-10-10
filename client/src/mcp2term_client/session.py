@@ -86,6 +86,24 @@ def _extract_warnings(payload: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _tool_result_to_payload(result: types.CallToolResult) -> dict[str, Any]:
+    """Convert a tool result into a dictionary payload."""
+
+    payload: dict[str, Any] = {}
+    if result.structuredContent and isinstance(result.structuredContent, Mapping):
+        payload.update(result.structuredContent)
+    if not payload:
+        for block in result.content:
+            if isinstance(block, types.TextContent):
+                try:
+                    data = json.loads(block.text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, Mapping):
+                    payload.update(data)
+    return payload
+
+
 def _iso_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -111,18 +129,7 @@ class CommandResponse:
     def from_call_tool_result(cls, result: types.CallToolResult) -> "CommandResponse":
         """Create a response object from a tool result payload."""
 
-        payload: dict[str, Any] = {}
-        if result.structuredContent:
-            payload.update(result.structuredContent)
-        else:
-            for block in result.content:
-                if isinstance(block, types.TextContent):
-                    try:
-                        data = json.loads(block.text)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(data, dict):
-                        payload.update(data)
+        payload = _tool_result_to_payload(result)
         return cls(
             command_id=str(payload.get("command_id", "")),
             command=str(payload.get("command", "")),
@@ -151,18 +158,7 @@ class CancelCommandResponse:
 
     @classmethod
     def from_call_tool_result(cls, result: types.CallToolResult) -> "CancelCommandResponse":
-        payload: dict[str, Any] = {}
-        if result.structuredContent:
-            payload.update(result.structuredContent)
-        else:
-            for block in result.content:
-                if isinstance(block, types.TextContent):
-                    try:
-                        data = json.loads(block.text)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(data, dict):
-                        payload.update(data)
+        payload = _tool_result_to_payload(result)
         signal_value = payload.get("signal")
         return cls(
             command_id=str(payload.get("command_id", "")),
@@ -184,22 +180,72 @@ class SendInputResponse:
 
     @classmethod
     def from_call_tool_result(cls, result: types.CallToolResult) -> "SendInputResponse":
-        payload: dict[str, Any] = {}
-        if result.structuredContent:
-            payload.update(result.structuredContent)
-        else:
-            for block in result.content:
-                if isinstance(block, types.TextContent):
-                    try:
-                        data = json.loads(block.text)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(data, dict):
-                        payload.update(data)
+        payload = _tool_result_to_payload(result)
         return cls(
             command_id=str(payload.get("command_id", "")),
             accepted=bool(payload.get("accepted", False)),
             eof=bool(payload.get("eof", False)),
+            warnings=_extract_warnings(payload),
+        )
+
+
+@dataclass(slots=True)
+class FileOperationLine:
+    """Represents an individual line returned from a file operation."""
+
+    number: int
+    text: str
+
+
+@dataclass(slots=True)
+class FileOperationResponse:
+    """Structured response returned from the server's ``manage_file`` tool."""
+
+    path: str
+    operation: str
+    success: bool
+    changed: bool
+    encoding: str
+    message: str | None
+    content: str | None
+    lines: tuple[FileOperationLine, ...]
+    line_numbers: tuple[int, ...]
+    warnings: tuple[str, ...] = tuple()
+
+    @classmethod
+    def from_call_tool_result(cls, result: types.CallToolResult) -> "FileOperationResponse":
+        payload = _tool_result_to_payload(result)
+        lines_payload = payload.get("lines")
+        parsed_lines: list[FileOperationLine] = []
+        if isinstance(lines_payload, (list, tuple)):
+            for entry in lines_payload:
+                if not isinstance(entry, Mapping):
+                    continue
+                number_raw = entry.get("number")
+                text_raw = entry.get("text", "")
+                try:
+                    number = int(number_raw)
+                except (TypeError, ValueError):
+                    continue
+                parsed_lines.append(FileOperationLine(number=number, text=str(text_raw)))
+        line_numbers_payload = payload.get("line_numbers")
+        parsed_numbers: list[int] = []
+        if isinstance(line_numbers_payload, (list, tuple, set)):
+            for entry in line_numbers_payload:
+                try:
+                    parsed_numbers.append(int(entry))
+                except (TypeError, ValueError):
+                    continue
+        return cls(
+            path=str(payload.get("path", "")),
+            operation=str(payload.get("operation", "")),
+            success=bool(payload.get("success", False)),
+            changed=bool(payload.get("changed", False)),
+            encoding=str(payload.get("encoding", "")),
+            message=str(payload.get("message")) if payload.get("message") is not None else None,
+            content=str(payload.get("content")) if payload.get("content") is not None else None,
+            lines=tuple(parsed_lines),
+            line_numbers=tuple(parsed_numbers),
             warnings=_extract_warnings(payload),
         )
 
@@ -534,6 +580,43 @@ class RemoteMcpSession:
         assert isinstance(response, SendInputResponse)
         return response.accepted
 
+    def manage_file(
+        self,
+        path: str,
+        *,
+        operation: str,
+        content: str | None = None,
+        line: int | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        encoding: str = "utf-8",
+        create_parents: bool = False,
+        overwrite: bool = False,
+        create_if_missing: bool = True,
+    ) -> FileOperationResponse:
+        try:
+            response = self._submit_request(
+                "manage_file",
+                path=path,
+                operation=operation,
+                content=content,
+                line=line,
+                start_line=start_line,
+                end_line=end_line,
+                encoding=encoding,
+                create_parents=create_parents,
+                overwrite=overwrite,
+                create_if_missing=create_if_missing,
+            )
+        except Exception as exc:
+            self._emit_warning(
+                f"manage_file request for {operation} {path} failed",
+                exception=exc,
+            )
+            raise
+        assert isinstance(response, FileOperationResponse)
+        return response
+
     def resolve_working_directory(self, working_directory: str | None = None) -> str:
         response = self.run_command(
             "pwd",
@@ -661,6 +744,29 @@ class RemoteMcpSession:
             request.future.set_result(response)
             self._emit_warnings(response.warnings)
             return True
+        if action == "manage_file":
+            raw_path = request.payload.get("path", "")
+            path = str(raw_path) if raw_path is not None else ""
+            operation_raw = request.payload.get("operation", "")
+            operation = str(operation_raw) if operation_raw is not None else "manage_file"
+            encoding_raw = request.payload.get("encoding", "utf-8")
+            encoding = str(encoding_raw) if encoding_raw is not None else "utf-8"
+            message = f"Failed to execute mcp.file {operation} on {path or 'target'}: {error}"
+            response = FileOperationResponse(
+                path=path,
+                operation=operation,
+                success=False,
+                changed=False,
+                encoding=encoding,
+                message=message,
+                content=None,
+                lines=tuple(),
+                line_numbers=tuple(),
+                warnings=(message,),
+            )
+            request.future.set_result(response)
+            self._emit_warnings(response.warnings)
+            return True
         return False
 
     async def _session_worker(self) -> None:
@@ -749,6 +855,21 @@ class RemoteMcpSession:
                             request.payload["command_id"],
                             request.payload.get("data", ""),
                             request.payload.get("eof", False),
+                        )
+                        request.future.set_result(result)
+                        self._emit_warnings(result.warnings)
+                    elif request.action == "manage_file":
+                        result = await self._async_manage_file(
+                            request.payload["path"],
+                            request.payload["operation"],
+                            request.payload.get("content"),
+                            request.payload.get("line"),
+                            request.payload.get("start_line"),
+                            request.payload.get("end_line"),
+                            request.payload.get("encoding", "utf-8"),
+                            bool(request.payload.get("create_parents", False)),
+                            bool(request.payload.get("overwrite", False)),
+                            bool(request.payload.get("create_if_missing", True)),
                         )
                         request.future.set_result(result)
                         self._emit_warnings(result.warnings)
@@ -871,6 +992,40 @@ class RemoteMcpSession:
             arguments["data"] = data
         result = await self._session.call_tool("send_stdin", arguments)
         return SendInputResponse.from_call_tool_result(result)
+
+    async def _async_manage_file(
+        self,
+        path: str,
+        operation: str,
+        content: str | None,
+        line: int | None,
+        start_line: int | None,
+        end_line: int | None,
+        encoding: str,
+        create_parents: bool,
+        overwrite: bool,
+        create_if_missing: bool,
+    ) -> FileOperationResponse:
+        if self._session is None:
+            raise RuntimeError("RemoteMcpSession used before start()")
+        arguments: dict[str, Any] = {
+            "path": path,
+            "operation": operation,
+            "encoding": encoding,
+            "create_parents": create_parents,
+            "overwrite": overwrite,
+            "create_if_missing": create_if_missing,
+        }
+        if content is not None:
+            arguments["content"] = content
+        if line is not None:
+            arguments["line"] = line
+        if start_line is not None:
+            arguments["start_line"] = start_line
+        if end_line is not None:
+            arguments["end_line"] = end_line
+        result = await self._session.call_tool("manage_file", arguments)
+        return FileOperationResponse.from_call_tool_result(result)
 
     async def _handle_log_message(self, params: types.LoggingMessageNotificationParams) -> None:
         data = params.data

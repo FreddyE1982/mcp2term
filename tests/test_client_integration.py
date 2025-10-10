@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -381,3 +383,69 @@ def test_remote_session_close_cancels_active_requests(use_real_dependencies: boo
     assert future.cancelled()
     with pytest.raises(CancelledError):
         future.result(timeout=0.1)
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_manage_file_command_executes_remote_operations(
+    use_real_dependencies: bool,
+) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        state: RemoteShellState | None = None
+        target_dir = "mcp-file-tests"
+        try:
+            cwd = session.resolve_working_directory()
+            state = RemoteShellState(cwd=cwd)
+            statuses: list[int] = []
+            outputs: list[str] = []
+            errors: list[str] = []
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: outputs.append(message),
+                error_writer=lambda message: errors.append(message),
+            )
+
+            unique_name = f"mcp-file-{uuid.uuid4().hex}.txt"
+            relative_path = f"{target_dir}/{unique_name}"
+
+            outputs.clear()
+            errors.clear()
+            create_status = processor.execute(
+                f"mcp.file create {relative_path} --content alpha --create-parents --overwrite"
+            )
+            assert create_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert outputs
+
+            outputs.clear()
+            errors.clear()
+            print_status = processor.execute(f"mcp.file print {relative_path}")
+            assert print_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert any("| alpha" in line for line in outputs)
+
+            outputs.clear()
+            errors.clear()
+            locate_status = processor.execute(
+                f"mcp.file locate {relative_path} --content alpha"
+            )
+            assert locate_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert any("Line" in line for line in outputs)
+        finally:
+            cleanup_state = state
+            try:
+                if cleanup_state is not None:
+                    session.run_command(
+                        f"rm -rf {shlex.quote(target_dir)}",
+                        working_directory=cleanup_state.cwd,
+                        environment=cleanup_state.environment,
+                    )
+            finally:
+                session.close()
