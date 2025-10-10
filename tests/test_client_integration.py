@@ -33,11 +33,13 @@ SERVER_HOST = "127.0.0.1"
 
 
 @contextmanager
-def running_server() -> str:
+def running_server(*, extra_env: dict[str, str] | None = None) -> str:
     import socket
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(os.path.join(ROOT, "src"))
+    if extra_env:
+        env.update(extra_env)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((SERVER_HOST, 0))
         port = sock.getsockname()[1]
@@ -330,6 +332,32 @@ def test_remote_processor_handles_interactive_cli(use_real_dependencies: bool) -
     assert not errors
     assert verify_response is not None
     assert "client!" in verify_response.stdout
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_remote_session_survives_server_warnings(use_real_dependencies: bool) -> None:
+    warning_messages: list[str] = []
+    response: CommandResponse | None = None
+    follow_up = None
+    with running_server(extra_env={"MCP2TERM_SHELL": "/nonexistent-mcp-shell"}) as url:
+        session = RemoteMcpSession(url, notice_writer=warning_messages.append)
+        session.start()
+        try:
+            response = session.run_command(
+                "echo failure",
+                working_directory="/",
+                environment=None,
+            )
+            follow_up = session.cancel_command("missing-command")
+        finally:
+            session.close()
+
+    assert response is not None
+    assert response.return_code != 0
+    assert response.warnings
+    assert follow_up is not None
+    assert follow_up.warnings
+    assert any("WARNING" in message for message in warning_messages)
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])

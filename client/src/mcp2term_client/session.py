@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import queue
 import sys
 import threading
@@ -7,7 +8,8 @@ import textwrap
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from datetime import datetime, timezone
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
@@ -17,6 +19,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
 from .backpressure import BackpressureMonitor, NoticeWriter
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_STREAMABLE_HTTP_PATH = "/mcp"
 _DIAGNOSTIC_TIMEOUT = 5.0
@@ -47,6 +51,45 @@ def _default_notice_writer(message: str) -> None:
     sys.stderr.flush()
 
 
+def _extract_warnings(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Normalize warning data from structured responses."""
+
+    collected: list[str] = []
+
+    def _record(value: Any) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if text:
+            collected.append(text)
+
+    data = payload.get("warnings")
+    if isinstance(data, Mapping):
+        for item in data.values():
+            _record(item)
+    elif isinstance(data, (list, tuple, set)):
+        for item in data:
+            _record(item)
+    elif data is not None:
+        _record(data)
+
+    if "warning" in payload:
+        _record(payload["warning"])
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in collected:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return tuple(ordered)
+
+
+def _iso_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass(slots=True)
 class CommandResponse:
     """Structured response returned from the server's ``run_command`` tool."""
@@ -61,6 +104,7 @@ class CommandResponse:
     finished_at: str
     duration: float
     timed_out: bool
+    warnings: tuple[str, ...] = tuple()
 
     @classmethod
     def from_call_tool_result(cls, result: types.CallToolResult) -> "CommandResponse":
@@ -89,6 +133,7 @@ class CommandResponse:
             finished_at=str(payload.get("finished_at", "")),
             duration=float(payload.get("duration", 0.0)),
             timed_out=bool(payload.get("timed_out", False)),
+            warnings=_extract_warnings(payload),
         )
 
 
@@ -100,6 +145,7 @@ class CancelCommandResponse:
     signal: int | None
     signal_name: str | None
     delivered: bool
+    warnings: tuple[str, ...] = tuple()
 
     @classmethod
     def from_call_tool_result(cls, result: types.CallToolResult) -> "CancelCommandResponse":
@@ -121,6 +167,7 @@ class CancelCommandResponse:
             signal=int(signal_value) if signal_value is not None else None,
             signal_name=str(payload.get("signal_name")) if payload.get("signal_name") is not None else None,
             delivered=bool(payload.get("delivered", False)),
+            warnings=_extract_warnings(payload),
         )
 
 
@@ -131,6 +178,7 @@ class SendInputResponse:
     command_id: str
     accepted: bool
     eof: bool
+    warnings: tuple[str, ...] = tuple()
 
     @classmethod
     def from_call_tool_result(cls, result: types.CallToolResult) -> "SendInputResponse":
@@ -150,6 +198,7 @@ class SendInputResponse:
             command_id=str(payload.get("command_id", "")),
             accepted=bool(payload.get("accepted", False)),
             eof=bool(payload.get("eof", False)),
+            warnings=_extract_warnings(payload),
         )
 
 
@@ -333,6 +382,25 @@ class RemoteMcpSession:
 
         return uuid4().hex
 
+    def _emit_warning(self, message: str, *, exception: BaseException | None = None) -> None:
+        text = message.strip()
+        if exception is not None and text and str(exception) not in text:
+            text = f"{text}: {exception}"
+        elif exception is not None and not text:
+            text = str(exception)
+        if not text:
+            return
+        prefixed = text if text.startswith("[mcp2term-client]") else f"[mcp2term-client] WARNING: {text}"
+        if exception is not None:
+            logger.warning(text, exc_info=exception)
+        else:
+            logger.warning(text)
+        self._notice_writer(prefixed)
+
+    def _emit_warnings(self, warnings: Iterable[str]) -> None:
+        for warning in warnings:
+            self._emit_warning(warning)
+
     def start(self) -> None:
         if self._started:
             return
@@ -387,7 +455,11 @@ class RemoteMcpSession:
             timeout=timeout,
             command_id=command_id,
         )
-        return future.result()
+        try:
+            return future.result()
+        except Exception as exc:
+            self._emit_warning(f"run_command request for '{command}' failed", exception=exc)
+            raise
 
     def run_command_async(
         self,
@@ -424,11 +496,15 @@ class RemoteMcpSession:
         *,
         signal: str | int | None = None,
     ) -> CancelCommandResponse:
-        response = self._submit_request(
-            "cancel_command",
-            command_id=command_id,
-            signal_value=signal,
-        )
+        try:
+            response = self._submit_request(
+                "cancel_command",
+                command_id=command_id,
+                signal_value=signal,
+            )
+        except Exception as exc:
+            self._emit_warning(f"cancel_command request for {command_id} failed", exception=exc)
+            raise
         assert isinstance(response, CancelCommandResponse)
         return response
 
@@ -439,12 +515,16 @@ class RemoteMcpSession:
         *,
         eof: bool = False,
     ) -> bool:
-        response = self._submit_request(
-            "send_stdin",
-            command_id=command_id,
-            data=data,
-            eof=eof,
-        )
+        try:
+            response = self._submit_request(
+                "send_stdin",
+                command_id=command_id,
+                data=data,
+                eof=eof,
+            )
+        except Exception as exc:
+            self._emit_warning(f"send_stdin request for {command_id} failed", exception=exc)
+            raise
         assert isinstance(response, SendInputResponse)
         return response.accepted
 
@@ -516,6 +596,66 @@ class RemoteMcpSession:
                 loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
+    def _handle_request_failure(self, request: _Request, error: Exception) -> bool:
+        if request.future.cancelled():
+            return True
+        action = request.action
+        if action == "call_tool":
+            payload = request.payload
+            command = str(payload.get("command", "")) if payload.get("command") is not None else ""
+            working_dir_raw = payload.get("working_directory")
+            working_directory = str(working_dir_raw) if working_dir_raw is not None else ""
+            command_id_raw = payload.get("command_id")
+            command_id = str(command_id_raw) if command_id_raw is not None else ""
+            timestamp = _iso_timestamp()
+            if command:
+                warning_message = f"Failed to execute '{command}' on remote host"
+            else:
+                warning_message = "Remote command execution failed"
+            warning_message = f"{warning_message}: {error}"
+            response = CommandResponse(
+                command_id=command_id,
+                command=command,
+                working_directory=working_directory,
+                return_code=-1,
+                stdout="",
+                stderr=str(error),
+                started_at=timestamp,
+                finished_at=timestamp,
+                duration=0.0,
+                timed_out=False,
+                warnings=(warning_message,),
+            )
+            request.future.set_result(response)
+            self._emit_warnings(response.warnings)
+            return True
+        if action == "cancel_command":
+            command_id = str(request.payload.get("command_id", ""))
+            warning_message = f"Failed to cancel command {command_id}: {error}"
+            response = CancelCommandResponse(
+                command_id=command_id,
+                signal=None,
+                signal_name=None,
+                delivered=False,
+                warnings=(warning_message,),
+            )
+            request.future.set_result(response)
+            self._emit_warnings(response.warnings)
+            return True
+        if action == "send_stdin":
+            command_id = str(request.payload.get("command_id", ""))
+            warning_message = f"Failed to send input to command {command_id}: {error}"
+            response = SendInputResponse(
+                command_id=command_id,
+                accepted=False,
+                eof=bool(request.payload.get("eof", False)),
+                warnings=(warning_message,),
+            )
+            request.future.set_result(response)
+            self._emit_warnings(response.warnings)
+            return True
+        return False
+
     async def _session_worker(self) -> None:
         queue_: asyncio.Queue[_Request] = asyncio.Queue()
         self._request_queue = queue_
@@ -559,6 +699,7 @@ class RemoteMcpSession:
                             finished: asyncio.Task[Any],
                             *,
                             future: Future[Any],
+                            request_ref: _Request,
                         ) -> None:
                             self._active_tasks.discard(finished)
                             if finished.cancelled():
@@ -571,19 +712,30 @@ class RemoteMcpSession:
                                 if not future.cancelled():
                                     future.set_exception(cancel_error)
                             except Exception as error:
-                                future.set_exception(error)
+                                handled = self._handle_request_failure(request_ref, error)
+                                if not handled and not future.done():
+                                    future.set_exception(error)
                             except BaseException:
                                 raise
                             else:
                                 future.set_result(result)
+                                if isinstance(result, CommandResponse):
+                                    self._emit_warnings(result.warnings)
 
-                        task.add_done_callback(lambda finished, future=request.future: _complete(finished, future=future))
+                        task.add_done_callback(
+                            lambda finished, future=request.future, request_ref=request: _complete(
+                                finished,
+                                future=future,
+                                request_ref=request_ref,
+                            )
+                        )
                     elif request.action == "cancel_command":
                         result = await self._async_cancel_command(
                             request.payload["command_id"],
                             request.payload.get("signal_value"),
                         )
                         request.future.set_result(result)
+                        self._emit_warnings(result.warnings)
                     elif request.action == "send_stdin":
                         result = await self._async_send_stdin(
                             request.payload["command_id"],
@@ -591,10 +743,13 @@ class RemoteMcpSession:
                             request.payload.get("eof", False),
                         )
                         request.future.set_result(result)
+                        self._emit_warnings(result.warnings)
                     else:
                         raise RuntimeError(f"Unknown request action: {request.action}")
                 except Exception as exc:
-                    request.future.set_exception(exc)
+                    handled = self._handle_request_failure(request, exc)
+                    if not handled and not request.future.done():
+                        request.future.set_exception(exc)
         except Exception as exc:
             if not self._startup_ready.is_set():
                 processed = await self._augment_startup_exception(exc)

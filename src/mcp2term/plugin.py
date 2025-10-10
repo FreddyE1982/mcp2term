@@ -6,11 +6,21 @@ import asyncio
 import importlib
 import inspect
 import logging
+import traceback
 import pkgutil
 import sys
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, Awaitable, Iterable, Mapping, MutableMapping, Protocol, TextIO, runtime_checkable
+from typing import (
+    Any,
+    Awaitable,
+    Iterable,
+    Mapping,
+    MutableMapping,
+    Protocol,
+    TextIO,
+    runtime_checkable,
+)
 
 from .streaming import (
     CommandCompleteEvent,
@@ -42,6 +52,28 @@ class PluginProtocol(Protocol):
     version: str
 
     def activate(self, registry: "PluginRegistry") -> Awaitable[None] | None: ...
+
+
+@dataclass(slots=True)
+class ServerWarningEvent:
+    """Warning raised by the server runtime that should be surfaced to plugins."""
+
+    tool_name: str
+    message: str
+    details: Mapping[str, Any]
+    exception: BaseException | None = None
+
+    def formatted_exception(self) -> str | None:
+        if self.exception is None:
+            return None
+        return "".join(traceback.format_exception_only(type(self.exception), self.exception)).strip()
+
+
+@runtime_checkable
+class ServerWarningListener(Protocol):
+    """Protocol for plugins interested in server warning notifications."""
+
+    async def on_server_warning(self, event: ServerWarningEvent) -> None: ...
 
 
 class ConsoleEchoListener(CommandStreamListener):
@@ -113,6 +145,12 @@ class PluginRegistry:
         logger.debug("Registering additional export %s", qualified_name)
         self._manager.exports[qualified_name] = value
 
+    def register_warning_listener(self, listener: ServerWarningListener) -> None:
+        if not isinstance(listener, ServerWarningListener):  # type: ignore[arg-type]
+            raise TypeError("Listener must implement ServerWarningListener protocol")
+        logger.debug("Registering server warning listener %s", listener)
+        self._manager.warning_listeners.append(listener)
+
 
 @dataclass(slots=True)
 class PluginManager:
@@ -120,6 +158,7 @@ class PluginManager:
 
     exports: MutableMapping[str, Any] = field(default_factory=dict)
     command_listeners: list[CommandStreamListener] = field(default_factory=list)
+    warning_listeners: list[ServerWarningListener] = field(default_factory=list)
     loaded_plugins: dict[str, PluginProtocol] = field(default_factory=dict)
     _console_echo_listener: ConsoleEchoListener | None = field(
         default=None, init=False, repr=False
@@ -280,22 +319,31 @@ class PluginManager:
         raise ValueError(f"Module {module.__name__} does not define a plugin instance")
 
     async def emit_command_start(self, event: CommandStartEvent) -> None:
-        await self._broadcast("on_command_start", event)
+        await self._broadcast(self.command_listeners, "on_command_start", event)
 
     async def emit_stdout(self, event: CommandOutputChunk) -> None:
-        await self._broadcast("on_command_stdout", event)
+        await self._broadcast(self.command_listeners, "on_command_stdout", event)
 
     async def emit_stderr(self, event: CommandOutputChunk) -> None:
-        await self._broadcast("on_command_stderr", event)
+        await self._broadcast(self.command_listeners, "on_command_stderr", event)
 
     async def emit_command_complete(self, event: CommandCompleteEvent) -> None:
-        await self._broadcast("on_command_complete", event)
+        await self._broadcast(self.command_listeners, "on_command_complete", event)
 
-    async def _broadcast(self, method: str, event: Any) -> None:
-        if not self.command_listeners:
+    async def emit_server_warning(self, event: ServerWarningEvent) -> None:
+        await self._broadcast(self.warning_listeners, "on_server_warning", event)
+
+    async def _broadcast(
+        self,
+        listeners: Iterable[Any],
+        method: str,
+        event: Any,
+    ) -> None:
+        listeners = list(listeners)
+        if not listeners:
             return
         awaitables: list[Awaitable[None]] = []
-        for listener in list(self.command_listeners):
+        for listener in listeners:
             handler = getattr(listener, method, None)
             if handler is None:
                 continue

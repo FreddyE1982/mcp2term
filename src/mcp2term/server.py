@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,8 +14,12 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
 from .config import ServerConfig
-from .plugin import GlobalPluginManager, PluginManager
+from .plugin import GlobalPluginManager, PluginManager, ServerWarningEvent
 from .shell import CommandExecutionError, CommandResult, CommandTimeoutError, ShellCommandExecutor
+from .streaming import CommandCompleteEvent, utcnow
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -57,6 +62,18 @@ def _serialize_timeout(event: CommandTimeoutError) -> dict[str, Any]:
     }
 
 
+def _serialize_event(event: CommandCompleteEvent, *, timed_out: bool) -> dict[str, Any]:
+    result = CommandResult(
+        request=event.request,
+        stdout=event.stdout,
+        stderr=event.stderr,
+        return_code=event.return_code,
+        started_at=event.started_at,
+        finished_at=event.finished_at,
+    )
+    return _serialize_result(result, timed_out=timed_out)
+
+
 def _resolve_signal(value: str | int | None) -> int:
     if value is None:
         return signal.SIGINT
@@ -69,6 +86,75 @@ def _resolve_signal(value: str | int | None) -> int:
         return getattr(signal, normalized)
     except AttributeError as exc:  # pragma: no cover - defensive branch
         raise ValueError(f"Unknown signal: {value}") from exc
+
+
+async def _emit_server_warning(
+    ctx: Context[ServerSession, ApplicationState],
+    state: ApplicationState,
+    *,
+    tool_name: str,
+    base_message: str,
+    exception: BaseException | None = None,
+    details: dict[str, Any] | None = None,
+) -> str:
+    details = details or {}
+    if exception is not None and base_message:
+        message = f"{base_message}: {exception}"
+    elif exception is not None:
+        message = str(exception)
+    else:
+        message = base_message
+
+    logger.warning("%s warning: %s", tool_name, message, exc_info=exception)
+    try:
+        await ctx.warning(message)
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception("Failed to deliver warning to client for %s", tool_name)
+
+    await state.plugin_manager.emit_server_warning(
+        ServerWarningEvent(
+            tool_name=tool_name,
+            message=message,
+            details=details,
+            exception=exception,
+        )
+    )
+    return message
+
+
+def _append_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
+    existing = payload.get("warnings")
+    if isinstance(existing, (list, tuple, set)):
+        warnings = [str(item) for item in existing if item]
+    elif existing:
+        warnings = [str(existing)]
+    else:
+        warnings = []
+    warnings.append(warning)
+    payload["warnings"] = warnings
+    return payload
+
+
+def _basic_command_failure(
+    command: str,
+    working_directory: Path | None,
+    command_id: str | None,
+    message: str,
+) -> dict[str, Any]:
+    finished = utcnow()
+    cwd = str(working_directory) if working_directory is not None else ""
+    return {
+        "command_id": command_id or "",
+        "command": command,
+        "working_directory": cwd,
+        "return_code": -1,
+        "stdout": "",
+        "stderr": message,
+        "started_at": finished.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration": 0.0,
+        "timed_out": False,
+    }
 
 
 def create_server(
@@ -113,6 +199,12 @@ def create_server(
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         target_path = Path(working_directory).expanduser().resolve() if working_directory else None
+        state = ctx.request_context.lifespan_context
+        details = {
+            "command": command,
+            "command_id": command_id or "",
+            "working_directory": str(target_path) if target_path else "",
+        }
         try:
             result = await ctx.request_context.lifespan_context.executor.run(
                 command,
@@ -125,10 +217,55 @@ def create_server(
             return _serialize_result(result, timed_out=False)
         except CommandTimeoutError as exc:
             if exc.event is None:
-                raise
-            return _serialize_timeout(exc)
+                warning = await _emit_server_warning(
+                    ctx,
+                    state,
+                    tool_name="run_command",
+                    base_message=f"Command '{command}' timed out",
+                    exception=exc,
+                    details=details,
+                )
+                return _append_warning(
+                    _basic_command_failure(command, target_path, command_id, str(exc)),
+                    warning,
+                )
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="run_command",
+                base_message=f"Command '{command}' timed out",
+                exception=exc,
+                details=details,
+            )
+            return _append_warning(_serialize_timeout(exc), warning)
         except CommandExecutionError as exc:
-            raise RuntimeError(str(exc)) from exc
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="run_command",
+                base_message="Command execution failed",
+                exception=exc,
+                details=details,
+            )
+            if exc.event is not None:
+                return _append_warning(_serialize_event(exc.event, timed_out=False), warning)
+            return _append_warning(
+                _basic_command_failure(command, target_path, command_id, str(exc)),
+                warning,
+            )
+        except Exception as exc:
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="run_command",
+                base_message="Unexpected error while executing command",
+                exception=exc,
+                details=details,
+            )
+            return _append_warning(
+                _basic_command_failure(command, target_path, command_id, str(exc)),
+                warning,
+            )
 
     @server.tool(name="cancel_command", description="Send a signal to a running command.")
     async def cancel_command(  # type: ignore[no-redef]
@@ -137,25 +274,70 @@ def create_server(
         signal_value: str | int | None = None,
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
+        state = ctx.request_context.lifespan_context
+        details = {"command_id": command_id, "signal_value": signal_value}
         try:
             resolved_signal = _resolve_signal(signal_value)
         except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="cancel_command",
+                base_message="Invalid signal value",
+                exception=exc,
+                details=details,
+            )
+            return {
+                "command_id": command_id,
+                "signal": None,
+                "signal_name": None,
+                "delivered": False,
+                "warnings": [warning],
+            }
 
-        delivered = await ctx.request_context.lifespan_context.executor.send_signal(
-            command_id,
-            resolved_signal,
-        )
         try:
-            signal_name = signal.Signals(resolved_signal).name
-        except ValueError:  # pragma: no cover - non-standard signal
-            signal_name = str(resolved_signal)
-        return {
-            "command_id": command_id,
-            "signal": resolved_signal,
-            "signal_name": signal_name,
-            "delivered": delivered,
-        }
+            delivered = await ctx.request_context.lifespan_context.executor.send_signal(
+                command_id,
+                resolved_signal,
+            )
+            try:
+                signal_name = signal.Signals(resolved_signal).name
+            except ValueError:  # pragma: no cover - non-standard signal
+                signal_name = str(resolved_signal)
+            response = {
+                "command_id": command_id,
+                "signal": resolved_signal,
+                "signal_name": signal_name,
+                "delivered": delivered,
+            }
+        except Exception as exc:
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="cancel_command",
+                base_message="Failed to send signal to command",
+                exception=exc,
+                details=details,
+            )
+            response = {
+                "command_id": command_id,
+                "signal": resolved_signal,
+                "signal_name": None,
+                "delivered": False,
+                "warnings": [warning],
+            }
+        else:
+            if not delivered:
+                warning = await _emit_server_warning(
+                    ctx,
+                    state,
+                    tool_name="cancel_command",
+                    base_message=f"No running command matches {command_id}; signal not delivered",
+                    exception=None,
+                    details=details,
+                )
+                response = _append_warning(response, warning)
+        return response
 
     @server.tool(name="send_stdin", description="Forward input to a running command's stdin pipe.")
     async def send_stdin(  # type: ignore[no-redef]
@@ -166,15 +348,44 @@ def create_server(
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         payload = data or ""
-        accepted = await ctx.request_context.lifespan_context.executor.send_stdin(
-            command_id,
-            payload,
-            eof=eof,
-        )
-        return {
+        state = ctx.request_context.lifespan_context
+        details = {"command_id": command_id, "data_length": len(payload), "eof": eof}
+        try:
+            accepted = await ctx.request_context.lifespan_context.executor.send_stdin(
+                command_id,
+                payload,
+                eof=eof,
+            )
+        except Exception as exc:
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="send_stdin",
+                base_message="Failed to forward stdin to command",
+                exception=exc,
+                details=details,
+            )
+            return {
+                "command_id": command_id,
+                "accepted": False,
+                "eof": eof,
+                "warnings": [warning],
+            }
+        response = {
             "command_id": command_id,
             "accepted": accepted,
             "eof": eof,
         }
+        if not accepted:
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="send_stdin",
+                base_message="Command is not accepting additional stdin",
+                exception=None,
+                details=details,
+            )
+            response = _append_warning(response, warning)
+        return response
 
     return server
