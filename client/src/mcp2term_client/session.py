@@ -104,6 +104,7 @@ class CommandResponse:
     finished_at: str
     duration: float
     timed_out: bool
+    pty_allocated: bool
     warnings: tuple[str, ...] = tuple()
 
     @classmethod
@@ -133,6 +134,7 @@ class CommandResponse:
             finished_at=str(payload.get("finished_at", "")),
             duration=float(payload.get("duration", 0.0)),
             timed_out=bool(payload.get("timed_out", False)),
+            pty_allocated=bool(payload.get("pty_allocated", False)),
             warnings=_extract_warnings(payload),
         )
 
@@ -446,6 +448,7 @@ class RemoteMcpSession:
         ephemeral_environment: dict[str, str] | None = None,
         timeout: float | None = None,
         command_id: str | None = None,
+        allocate_pty: bool = False,
     ) -> CommandResponse:
         command_id, future = self.run_command_async(
             command,
@@ -454,6 +457,7 @@ class RemoteMcpSession:
             ephemeral_environment=ephemeral_environment,
             timeout=timeout,
             command_id=command_id,
+            allocate_pty=allocate_pty,
         )
         try:
             return future.result()
@@ -470,6 +474,7 @@ class RemoteMcpSession:
         ephemeral_environment: dict[str, str] | None = None,
         timeout: float | None = None,
         command_id: str | None = None,
+        allocate_pty: bool = False,
     ) -> tuple[str, Future[CommandResponse]]:
         env: dict[str, str] = {}
         if environment:
@@ -485,6 +490,7 @@ class RemoteMcpSession:
             environment=env,
             timeout=effective_timeout,
             command_id=actual_command_id,
+            allocate_pty=allocate_pty,
             wait=False,
         )
         assert isinstance(future, Future)
@@ -624,6 +630,7 @@ class RemoteMcpSession:
                 finished_at=timestamp,
                 duration=0.0,
                 timed_out=False,
+                pty_allocated=bool(payload.get("allocate_pty", False)),
                 warnings=(warning_message,),
             )
             request.future.set_result(response)
@@ -691,6 +698,7 @@ class RemoteMcpSession:
                                 request.payload.get("environment", {}),
                                 request.payload.get("timeout"),
                                 request.payload.get("command_id"),
+                                bool(request.payload.get("allocate_pty", False)),
                             )
                         )
                         self._active_tasks.add(task)
@@ -819,6 +827,7 @@ class RemoteMcpSession:
         environment: dict[str, str],
         timeout: float | None,
         command_id: str | None,
+        allocate_pty: bool,
     ) -> CommandResponse:
         if self._session is None:
             raise RuntimeError("RemoteMcpSession used before start()")
@@ -831,6 +840,8 @@ class RemoteMcpSession:
             arguments["timeout"] = timeout
         if command_id is not None:
             arguments["command_id"] = command_id
+        if allocate_pty:
+            arguments["allocate_pty"] = True
         result = await self._session.call_tool("run_command", arguments)
         return CommandResponse.from_call_tool_result(result)
 

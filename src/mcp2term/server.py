@@ -50,6 +50,7 @@ def _serialize_result(result: CommandResult, *, timed_out: bool) -> dict[str, An
         "finished_at": result.finished_at.isoformat(),
         "duration": result.duration,
         "timed_out": timed_out,
+        "pty_allocated": result.pty_allocated,
     }
 
 
@@ -66,6 +67,7 @@ def _serialize_timeout(event: CommandTimeoutError) -> dict[str, Any]:
         "finished_at": event.event.finished_at.isoformat(),
         "duration": event.event.duration,
         "timed_out": True,
+        "pty_allocated": event.event.request.allocate_pty,
     }
 
 
@@ -77,6 +79,7 @@ def _serialize_event(event: CommandCompleteEvent, *, timed_out: bool) -> dict[st
         return_code=event.return_code,
         started_at=event.started_at,
         finished_at=event.finished_at,
+        pty_allocated=event.request.allocate_pty,
     )
     return _serialize_result(result, timed_out=timed_out)
 
@@ -161,6 +164,7 @@ def _basic_command_failure(
         "finished_at": finished.isoformat(),
         "duration": 0.0,
         "timed_out": False,
+        "pty_allocated": False,
     }
 
 
@@ -203,6 +207,7 @@ def create_server(
         environment: dict[str, str] | None = None,
         timeout: float | None = None,
         command_id: str | None = None,
+        allocate_pty: bool | None = None,
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         target_path = Path(working_directory).expanduser().resolve() if working_directory else None
@@ -211,6 +216,7 @@ def create_server(
             "command": command,
             "command_id": command_id or "",
             "working_directory": str(target_path) if target_path else "",
+            "allocate_pty": bool(allocate_pty),
         }
         try:
             result = await ctx.request_context.lifespan_context.executor.run(
@@ -220,6 +226,7 @@ def create_server(
                 environment=environment,
                 timeout=timeout,
                 command_id=command_id,
+                allocate_pty=bool(allocate_pty),
             )
             return _serialize_result(result, timed_out=False)
         except CommandTimeoutError as exc:

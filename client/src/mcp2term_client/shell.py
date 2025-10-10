@@ -69,11 +69,13 @@ class RemoteCommandProcessor:
 
     def _execute_remote_command(self, tokens: list[str], assignments: dict[str, str]) -> int:
         command_text = " ".join(shlex.quote(token) for token in tokens)
+        allocate_pty = self._should_allocate_pty(tokens)
         command_id, future = self.session.run_command_async(
             command_text,
             working_directory=self.state.cwd,
             environment=self.state.environment,
             ephemeral_environment=assignments,
+            allocate_pty=allocate_pty,
         )
         self.current_command_id = command_id
         reader = self._create_input_reader()
@@ -158,6 +160,9 @@ class RemoteCommandProcessor:
         if self.input_reader_factory is not None:
             return self.input_reader_factory()
         return TerminalInputReader()
+
+    def _should_allocate_pty(self, tokens: list[str]) -> bool:
+        return self.input_reader_factory is not None
 
     def _forward_interactive_input(self, command_id: str, reader: InputReader) -> bool:
         forwarded = False
