@@ -541,6 +541,14 @@ def create_server(
                         text=content,
                         encoding=encoding,
                     )
+                case "patch":
+                    if content is None:
+                        raise FileOperationError("Patch operation requires diff content")
+                    result = editor.apply_patch(
+                        path,
+                        patch_text=content,
+                        encoding=encoding,
+                    )
                 case _:
                     raise FileOperationError(f"Unsupported file operation: {operation}")
         except FileOperationError as exc:

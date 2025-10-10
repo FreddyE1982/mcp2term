@@ -24,6 +24,7 @@ _ALLOWED_OPERATIONS = (
     "delete",
     "insert",
     "locate",
+    "patch",
     "print",
     "replace",
     "write",
@@ -86,6 +87,7 @@ def _create_parser() -> _ArgumentParser:
   delete   Remove a range of lines entirely.
   print    Display the requested line range with numbering.
   locate   Report line numbers containing the provided search text.
+  patch    Apply a unified diff patch to an existing file.
 """
     parser = _ArgumentParser(
         prog="filetool",
@@ -291,6 +293,11 @@ def _validate_arguments(
     if operation in {"write", "append", "insert"} and content is None:
         raise FileCommandParseError(
             f"The {operation} operation requires content via --content, --content-from-file, or --stdin.",
+        )
+
+    if operation == "patch" and content is None:
+        raise FileCommandParseError(
+            "The patch operation requires a unified diff via --content, --content-from-file, or --stdin.",
         )
 
     if operation == "locate":

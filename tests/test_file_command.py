@@ -62,6 +62,36 @@ def test_parse_manage_file_from_file(tmp_path: Path, use_real_dependencies: bool
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_patch_from_file(tmp_path: Path, use_real_dependencies: bool) -> None:
+    diff_file = tmp_path / "delta.diff"
+    diff_file.write_text(
+        """--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-old\n+new\n""",
+        encoding="utf-8",
+    )
+    command = parse_manage_file_command(
+        [
+            "patch",
+            "sample.txt",
+            "--content-from-file",
+            str(diff_file),
+        ]
+    )
+    assert command.operation == "patch"
+    assert "@@ -1 +1 @@" in (command.content or "")
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_patch_requires_content(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command([
+            "patch",
+            "sample.txt",
+        ])
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
 def test_parse_manage_file_rejects_conflicting_sources(
     tmp_path: Path, use_real_dependencies: bool
 ) -> None:
