@@ -36,3 +36,7 @@
 ## Interactive input policy plugins
 - **Purpose:** Allow operators to inspect, transform, or record interactive stdin data flowing from clients to the remote server.
 - **Usage:** Extend the plugin registry with hooks fired before `send_stdin` writes to subprocess pipes so plugins can redact secrets, enforce input quotas, or tee traffic into compliance archives. Policies could also modify the delivery strategy (for example, chunk sizing or encoding) without changing the core executor.
+
+## Warning analytics dashboards
+- **Purpose:** Capture and aggregate warning events emitted by the server and client so operators can monitor recurring failure patterns, correlate them with infrastructure incidents, and produce proactive alerts.
+- **Usage:** Implement a plugin using the new warning listener hooks to forward warning metadata into an observability pipeline (for example, Prometheus or OpenTelemetry). Provide client-side adapters that subscribe to notice writers, batching warnings for long-term storage while keeping the interactive terminal output readable. Document configuration for routing warnings to dashboards and setting thresholds for alerting.

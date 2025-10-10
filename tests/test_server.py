@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from mcp2term.config import ServerConfig
-from mcp2term.plugin import PluginManager
+from mcp2term.plugin import PluginManager, PluginRegistry, ServerWarningEvent
 from mcp2term.server import create_server
 
 
@@ -25,3 +25,32 @@ def test_plugin_manager_exports_include_shell_executor(use_real_dependencies: bo
     exported_names = set(manager.exports)
     assert any(name.endswith("ShellCommandExecutor") for name in exported_names)
     assert any(name.endswith("BackpressureMonitor") for name in exported_names)
+
+
+class WarningRecorder:
+    def __init__(self) -> None:
+        self.events: list[ServerWarningEvent] = []
+
+    async def on_server_warning(self, event: ServerWarningEvent) -> None:
+        self.events.append(event)
+
+
+def test_plugin_manager_emits_warning_event() -> None:
+    manager = PluginManager()
+    recorder = WarningRecorder()
+    PluginRegistry(manager).register_warning_listener(recorder)
+
+    asyncio.run(
+        manager.emit_server_warning(
+            ServerWarningEvent(
+                tool_name="run_command",
+                message="failure",
+                details={"command": "echo"},
+                exception=None,
+            )
+        )
+    )
+
+    assert recorder.events
+    assert recorder.events[0].tool_name == "run_command"
+    assert recorder.events[0].message == "failure"
