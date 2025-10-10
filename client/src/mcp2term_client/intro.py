@@ -123,6 +123,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "Ctrl+C sends the configured interrupt signal to the remote process via the MCP cancellation API.",
         "Backpressure notices warn you whenever output buffering or pending requests build up, so you know when to pause.",
         "Startup diagnostics explain connectivity issues if the Streamable HTTP endpoint cannot be reached.",
+        "Inline escape sequences such as `\\n` and `\\t` are decoded safely so single-line shells can deliver rich multi-line payloads without surprises.",
     ]
 
     special_commands: list[str] = [
@@ -141,6 +142,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "`print` streams selected line ranges back to the terminal, perfect for quick inspections without an editor.",
         "`locate --content \"needle\"` returns the remote line numbers that match your search text for faster navigation.",
         "`patch --stdin` or `--content-from-file` applies unified diffs just like the automation-friendly `apply_patch` helper.",
+        "Inline patches (including literal `\\ No newline at end of file` markers) round-trip cleanly through the parser and remote workflow thanks to expanded unit and integration coverage.",
         "All file edits emit structured audit events through the plugin registry so operators can observe and extend behaviour.",
     ]
 
@@ -155,7 +157,8 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         items=tuple(file_operations),
         description=(
             "File commands map directly to the server's `manage_file` MCP tool. Combine options such as `--encoding`, "
-            "`--create-if-missing`, and `--eof` flags to match your workflow."
+            "`--create-if-missing`, and `--eof` flags to match your workflow while upcoming escape-decoding profiles "
+            "keep the ergonomics tuneable for future releases."
         ),
     )
 
