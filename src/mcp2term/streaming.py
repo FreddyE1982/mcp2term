@@ -17,6 +17,7 @@ class CommandRequest:
     working_directory: str
     environment: dict[str, str]
     timeout: float | None
+    allocate_pty: bool = False
 
 
 @dataclass(slots=True)

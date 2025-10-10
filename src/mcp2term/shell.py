@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import errno
+import os
+import pty
 import logging
 import signal
 from asyncio.subprocess import Process
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -40,10 +43,63 @@ class CommandResult:
     return_code: int
     started_at: datetime
     finished_at: datetime
+    pty_allocated: bool
 
     @property
     def duration(self) -> float:
         return (self.finished_at - self.started_at).total_seconds()
+
+
+@dataclass(slots=True)
+class _ManagedProcess:
+    """Track runtime metadata for a running subprocess."""
+
+    process: Process
+    stdin: asyncio.StreamWriter | None
+    allocate_pty: bool
+    pty_master: int | None = None
+    _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    async def send(self, command_id: str, data: str, *, eof: bool) -> bool:
+        if self.stdin is not None and not self.stdin.is_closing():
+            try:
+                if data:
+                    self.stdin.write(data.encode("utf-8"))
+                    await self.stdin.drain()
+                if eof:
+                    try:
+                        self.stdin.write_eof()
+                    except (AttributeError, RuntimeError, ValueError):
+                        self.stdin.close()
+                return True
+            except (BrokenPipeError, ConnectionResetError, RuntimeError, ValueError) as exc:
+                logger.warning("Failed to deliver stdin to command %s: %s", command_id, exc)
+                return False
+
+        if self.pty_master is None:
+            return False
+
+        async with self._write_lock:
+            loop = asyncio.get_running_loop()
+            try:
+                if data:
+                    await loop.run_in_executor(None, os.write, self.pty_master, data.encode("utf-8"))
+                if eof:
+                    await loop.run_in_executor(None, os.write, self.pty_master, b"\x04")
+                return True
+            except OSError as exc:  # pragma: no cover - platform specific
+                logger.warning("Failed to deliver stdin to PTY command %s: %s", command_id, exc)
+                return False
+
+    def close(self) -> None:
+        if self.stdin is not None and not self.stdin.is_closing():
+            self.stdin.close()
+        if self.pty_master is not None:
+            try:
+                os.close(self.pty_master)
+            except OSError:
+                pass
+            self.pty_master = None
 
 
 class CommandExecutionError(RuntimeError):
@@ -83,7 +139,7 @@ class ShellCommandExecutor:
     def __init__(self, config: ServerConfig, plugin_manager: PluginManager) -> None:
         self.config = config
         self.plugin_manager = plugin_manager
-        self._running_commands: dict[str, Process] = {}
+        self._running_commands: dict[str, _ManagedProcess] = {}
         self._running_lock = asyncio.Lock()
         self.plugin_manager.register_export("mcp2term.shell.executor", self)
 
@@ -96,6 +152,7 @@ class ShellCommandExecutor:
         environment: Mapping[str, str] | None = None,
         timeout: float | None = None,
         command_id: str | None = None,
+        allocate_pty: bool = False,
     ) -> CommandResult:
         env = self.config.build_environment()
         if environment:
@@ -108,24 +165,76 @@ class ShellCommandExecutor:
             working_directory=cwd,
             environment=dict(env),
             timeout=timeout_value,
+            allocate_pty=allocate_pty,
         )
         started_at = utcnow()
         await self.plugin_manager.emit_command_start(CommandStartEvent(request=request, started_at=started_at))
         emitter = _ContextEmitter(ctx, self.plugin_manager, request)
 
         process: Process | None = None
+        managed: _ManagedProcess | None = None
+        stdout_task: asyncio.Task[str] | None = None
+        stderr_task: asyncio.Task[str] | None = None
+        master_fd: int | None = None
+        slave_fd: int | None = None
         try:
             try:
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    stdin=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=env,
-                    executable=self.config.shell_path,
-                )
+                if allocate_pty:
+                    master_fd, slave_fd = pty.openpty()
+                    os.set_inheritable(master_fd, False)
+                    os.set_inheritable(slave_fd, False)
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        stdin=slave_fd,
+                        cwd=cwd,
+                        env=env,
+                        executable=self.config.shell_path,
+                    )
+                    os.close(slave_fd)
+                    slave_fd = None
+                    managed = _ManagedProcess(
+                        process=process,
+                        stdin=None,
+                        allocate_pty=True,
+                        pty_master=master_fd,
+                    )
+                    stdout_task = asyncio.create_task(
+                        self._consume_pty_stream(master_fd, emitter.emit_stdout)
+                    )
+                else:
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.PIPE,
+                        cwd=cwd,
+                        env=env,
+                        executable=self.config.shell_path,
+                    )
+                    managed = _ManagedProcess(
+                        process=process,
+                        stdin=process.stdin,
+                        allocate_pty=False,
+                    )
+                    stdout_task = asyncio.create_task(
+                        self._consume_stream(process.stdout, emitter.emit_stdout)
+                    )
+                    stderr_task = asyncio.create_task(
+                        self._consume_stream(process.stderr, emitter.emit_stderr)
+                    )
             except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+                if master_fd is not None:
+                    try:
+                        os.close(master_fd)
+                    except OSError:
+                        pass
+                if slave_fd is not None:
+                    try:
+                        os.close(slave_fd)
+                    except OSError:
+                        pass
                 finished_at = utcnow()
                 event = CommandCompleteEvent(
                     request=request,
@@ -140,11 +249,8 @@ class ShellCommandExecutor:
                 raise CommandExecutionError(f"Failed to execute command: {exc}", event=event) from exc
 
             async with self._running_lock:
-                assert process is not None
-                self._running_commands[request.command_id] = process
-
-            stdout_task = asyncio.create_task(self._consume_stream(process.stdout, emitter.emit_stdout))
-            stderr_task = asyncio.create_task(self._consume_stream(process.stderr, emitter.emit_stderr))
+                assert managed is not None
+                self._running_commands[request.command_id] = managed
 
             async def wait_process(proc: Process) -> int:
                 if timeout_value is None:
@@ -164,7 +270,14 @@ class ShellCommandExecutor:
                 await process.wait()
                 raise
 
-            stdout_text, stderr_text = await asyncio.gather(stdout_task, stderr_task)
+            if stdout_task is None:
+                stdout_text = ""
+            else:
+                stdout_text = await stdout_task
+            if stderr_task is None:
+                stderr_text = ""
+            else:
+                stderr_text = await stderr_task
             finished_at = utcnow()
             event = CommandCompleteEvent(
                 request=request,
@@ -189,11 +302,14 @@ class ShellCommandExecutor:
                 return_code=return_code,
                 started_at=started_at,
                 finished_at=finished_at,
+                pty_allocated=allocate_pty,
             )
         finally:
             if process is not None:
                 async with self._running_lock:
-                    self._running_commands.pop(request.command_id, None)
+                    entry = self._running_commands.pop(request.command_id, None)
+                if entry is not None:
+                    entry.close()
 
     async def _consume_stream(
         self,
@@ -208,7 +324,12 @@ class ShellCommandExecutor:
         buffer = StringIO()
         try:
             while True:
-                data = await stream.read(chunk_size)
+                try:
+                    data = await stream.read(chunk_size)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        break
+                    raise
                 if not data:
                     break
                 text = decoder.decode(data)
@@ -224,15 +345,38 @@ class ShellCommandExecutor:
             await emitter(remaining)
         return buffer.getvalue()
 
+    async def _consume_pty_stream(
+        self,
+        master_fd: int,
+        emitter: Callable[[str], Awaitable[None]],
+    ) -> str:
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        read_fd = os.dup(master_fd)
+        read_file = os.fdopen(read_fd, "rb", buffering=0)
+        transport = None
+        try:
+            transport, _ = await loop.connect_read_pipe(lambda: protocol, read_file)
+            return await self._consume_stream(reader, emitter)
+        finally:
+            if transport is not None:
+                transport.close()
+            try:
+                read_file.close()
+            except OSError:
+                pass
+
     async def send_signal(self, command_id: str, sig: int = signal.SIGINT) -> bool:
         """Send ``sig`` to the running command identified by ``command_id``."""
 
         async with self._running_lock:
-            process = self._running_commands.get(command_id)
+            entry = self._running_commands.get(command_id)
 
-        if process is None:
+        if entry is None:
             return False
 
+        process = entry.process
         try:
             process.send_signal(sig)
             return True
@@ -265,25 +409,9 @@ class ShellCommandExecutor:
         """
 
         async with self._running_lock:
-            process = self._running_commands.get(command_id)
+            entry = self._running_commands.get(command_id)
 
-        if process is None:
+        if entry is None:
             return False
 
-        writer = process.stdin
-        if writer is None or writer.is_closing():
-            return False
-
-        try:
-            if data:
-                writer.write(data.encode("utf-8"))
-                await writer.drain()
-            if eof:
-                try:
-                    writer.write_eof()
-                except (AttributeError, RuntimeError, ValueError):
-                    writer.close()
-            return True
-        except (BrokenPipeError, ConnectionResetError, RuntimeError, ValueError) as exc:
-            logger.warning("Failed to deliver stdin to command %s: %s", command_id, exc)
-            return False
+        return await entry.send(command_id, data, eof=eof)
