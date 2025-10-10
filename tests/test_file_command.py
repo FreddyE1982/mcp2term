@@ -111,3 +111,53 @@ def test_parse_manage_file_rejects_conflicting_sources(
 def test_parse_manage_file_help(tmp_path: Path, use_real_dependencies: bool) -> None:
     with pytest.raises(FileCommandHelp):
         parse_manage_file_command(["--help"])
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_decodes_inline_patch_escape_sequences(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    inline_patch = (
+        f"--- a/sample.txt\\n"
+        f"+++ b/sample.txt\\n"
+        "@@ -1 +1 @@\\n"
+        "-old\\n"
+        "+new\\n"
+    )
+    command = parse_manage_file_command(
+        [
+            "patch",
+            "sample.txt",
+            "--content",
+            inline_patch,
+        ]
+    )
+    assert command.content is not None
+    assert command.content.splitlines()[0] == f"--- a/sample.txt"
+    assert command.content.splitlines()[-1] == "+new"
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_preserves_backslash_leading_lines(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    inline_patch = (
+        f"--- a/sample.txt\\n"
+        f"+++ b/sample.txt\\n"
+        "@@ -1,2 +1,2 @@\\n"
+        " alpha\\n"
+        "-beta\\n"
+        "\\ No newline at end of file\\n"
+        "+beta-updated\\n"
+        "\\ No newline at end of file\\n"
+    )
+    command = parse_manage_file_command(
+        [
+            "patch",
+            "sample.txt",
+            "--content",
+            inline_patch,
+        ]
+    )
+    assert command.content is not None
+    assert "\\ No newline at end of file" in command.content

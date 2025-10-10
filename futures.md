@@ -45,6 +45,10 @@
 - **Purpose:** Layer higher-level diffing and templating workflows on top of the existing `manage_file` tool so complex multi-file refactors can be performed reproducibly.
 - **Usage:** Build on the unified diff support exposed via the new `patch` operation by layering templating DSLs, validation hooks, and preview tooling. Provide plugin hooks to validate patches, inject pre-commit checks, and broadcast file mutation events to auditing backends.
 
+## Inline escape decoding profiles
+- **Purpose:** Allow operators to customise how inline `filetool` content is normalised when it contains escape sequences (for example, turning decoding off entirely or enabling additional escape rules for binary payloads).
+- **Usage:** Extend the command parser with configurable profiles that can be selected via command-line flags or plugin policies. Profiles should specify which escape sequences are recognised and whether decoding is conditional on the absence of literal newlines, ensuring administrators can strike the right balance between ergonomics and exactness for their workflows.
+
 ## File operation conflict detection
 - **Purpose:** Detect and prevent conflicting edits when multiple clients edit the same file concurrently through the MCP tools.
 - **Usage:** Introduce optimistic concurrency controls to `FileEditor` that compute content hashes prior to mutation and verify they still match when applying edits. Expose the checksums through `FileOperationResult` so plugins and clients can warn operators about potential conflicts and offer auto-merge strategies.

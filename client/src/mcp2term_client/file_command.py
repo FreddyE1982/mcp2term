@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,40 @@ _ALLOWED_OPERATIONS = (
     "replace",
     "write",
 )
+
+_ESCAPE_SEQUENCE_PATTERN = re.compile(r"\\([nrt0])")
+
+
+def _decode_inline_escape_sequences(text: str) -> str:
+    """Return ``text`` with common escape sequences expanded.
+
+    The decoding intentionally focuses on the sequences most frequently used when
+    authors need to express multi-line payloads from single-line shells. Only the
+    escapes recognised by :class:`_ESCAPE_SEQUENCE_PATTERN` are expanded so that
+    other backslash-prefixed values remain untouched (for example the ``\\`` that
+    prefixes ``"\\ No newline at end of file"`` lines in unified diffs).
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        mapping = {
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+            "0": "\0",
+        }
+        return mapping.get(match.group(1), match.group(0))
+
+    return _ESCAPE_SEQUENCE_PATTERN.sub(_replace, text)
+
+
+def _should_decode_inline_escape_sequences(text: str) -> bool:
+    """Return ``True`` when ``text`` should be interpreted for inline escapes."""
+
+    if "\n" in text or "\r" in text:
+        # Real newlines are already present so the caller was able to supply
+        # structured content directly; avoid rewriting the payload.
+        return False
+    return _ESCAPE_SEQUENCE_PATTERN.search(text) is not None
 
 
 class FileCommandError(ValueError):
@@ -102,7 +137,12 @@ def _create_parser() -> _ArgumentParser:
         "--content",
         "-c",
         dest="content",
-        help="Inline text content for operations that require it.",
+        help=(
+            "Inline text content for operations that require it. "
+            "When the payload contains escape sequences such as \\n or \\t and no "
+            "literal newlines, those escapes are expanded automatically so single-line shells can "
+            "submit multi-line data."
+        ),
     )
     parser.add_argument(
         "--content-from-file",
@@ -198,10 +238,9 @@ def parse_manage_file_command(
             usage=parser.format_usage(),
         ) from exc
 
-    stdin_stream = stdin if stdin is not None else sys.stdin
-    content = _resolve_content(namespace, stdin_stream)
-
     operation = namespace.operation
+    stdin_stream = stdin if stdin is not None else sys.stdin
+    content = _resolve_content(namespace, stdin_stream, operation=operation)
     path = namespace.path
     encoding = namespace.encoding
     line = namespace.line
@@ -224,7 +263,12 @@ def parse_manage_file_command(
     )
 
 
-def _resolve_content(namespace: argparse.Namespace, stdin_stream: TextIO) -> str | None:
+def _resolve_content(
+    namespace: argparse.Namespace,
+    stdin_stream: TextIO,
+    *,
+    operation: str,
+) -> str | None:
     """Determine the content payload from the parsed namespace."""
 
     sources = [
@@ -245,7 +289,10 @@ def _resolve_content(namespace: argparse.Namespace, stdin_stream: TextIO) -> str
         return None
 
     if namespace.content is not None:
-        return namespace.content
+        content = namespace.content
+        if operation in {"append", "create", "insert", "patch", "replace", "write"} and _should_decode_inline_escape_sequences(content):
+            content = _decode_inline_escape_sequences(content)
+        return content
     if namespace.content_file is not None:
         path = Path(namespace.content_file).expanduser()
         try:
