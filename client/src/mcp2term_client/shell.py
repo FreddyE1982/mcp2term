@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .input import InputReader, TerminalInputReader
+from .intro import IntroContext, render_intro_message
 from .session import RemoteMcpSession
 from .state import RemoteShellState
 
@@ -225,6 +226,18 @@ class XonshShellRunner:
         unsubscribe = _subscribe_event(events.on_transform_command, transform)
 
         print(f"Connected to {self._url} (cwd: {self._processor.state.cwd})")
+
+        intro_message = render_intro_message(
+            IntroContext(
+                url=self._url,
+                cwd=self._processor.state.cwd,
+                default_timeout=self._processor.session.default_timeout,
+                session=self._processor.session,
+                processor=self._processor,
+                state=self._processor.state,
+            )
+        )
+        print(intro_message, end="")
 
         try:
             XSH.shell.shell.cmdloop()
