@@ -8,9 +8,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .file_command import (
+    FileCommandHelp,
+    FileCommandParseError,
+    ManageFileCommand,
+    parse_manage_file_command,
+)
 from .input import InputReader, TerminalInputReader
 from .intro import IntroContext, render_intro_message
-from .session import RemoteMcpSession
+from .session import FileOperationResponse, RemoteMcpSession
 from .state import RemoteShellState
 
 EXEC_FUNCTION_NAME = "__mcp_remote_execute__"
@@ -64,6 +70,9 @@ class RemoteCommandProcessor:
         if handler := builtin_handlers.get(command_name):
             self.state.update_environment(assignments)
             return handler(remainder[1:], assignments)
+
+        if command_name == "mcp.file":
+            return self._handle_manage_file_command(remainder[1:], assignments)
 
         return self._execute_remote_command(remainder, assignments)
 
@@ -139,6 +148,81 @@ class RemoteCommandProcessor:
             self.state.remove_environment_keys(arguments)
         self.status_callback(0)
         return 0
+
+    def _handle_manage_file_command(
+        self,
+        arguments: list[str],
+        assignments: dict[str, str],
+    ) -> int:
+        self.state.update_environment(assignments)
+        try:
+            command: ManageFileCommand = parse_manage_file_command(arguments)
+        except FileCommandHelp as help_exc:
+            help_text = help_exc.help_text.rstrip("\n")
+            for line in help_text.split("\n"):
+                self.output_writer(line)
+            self.status_callback(0)
+            return 0
+        except FileCommandParseError as parse_exc:
+            usage = (parse_exc.usage or "").strip()
+            if usage:
+                for line in usage.split("\n"):
+                    if line:
+                        self.error_writer(line)
+            self.error_writer(f"mcp.file: {parse_exc}")
+            self.status_callback(2)
+            return 2
+        except Exception as exc:
+            self.error_writer(f"mcp.file: {exc}")
+            self.status_callback(1)
+            return 1
+
+        try:
+            response = self.session.manage_file(
+                command.path,
+                operation=command.operation,
+                content=command.content,
+                line=command.line,
+                start_line=command.start_line,
+                end_line=command.end_line,
+                encoding=command.encoding,
+                create_parents=command.create_parents,
+                overwrite=command.overwrite,
+                create_if_missing=command.create_if_missing,
+            )
+        except Exception as exc:
+            self.error_writer(f"mcp.file: {exc}")
+            self.status_callback(1)
+            return 1
+
+        self._render_manage_file_response(response)
+        status = 0 if response.success else 1
+        self.status_callback(status)
+        return status
+
+    def _render_manage_file_response(self, response: FileOperationResponse) -> None:
+        message = response.message
+        if not message:
+            if response.success:
+                message = f"{response.operation} succeeded for {response.path}".strip()
+            else:
+                message = f"{response.operation} failed for {response.path}".strip()
+        writer = self.output_writer if response.success else self.error_writer
+        if message:
+            writer(message)
+
+        if response.lines:
+            width = max(len(str(line.number)) for line in response.lines)
+            for line in response.lines:
+                self.output_writer(f"{line.number:>{width}} | {line.text}")
+        elif response.operation == "print" and response.content and not response.line_numbers:
+            for line in response.content.splitlines():
+                self.output_writer(line)
+
+        if response.line_numbers:
+            label = "Line number" if len(response.line_numbers) == 1 else "Line numbers"
+            formatted = ", ".join(str(number) for number in response.line_numbers)
+            self.output_writer(f"{label}: {formatted}")
 
     @staticmethod
     def _split_assignments(tokens: list[str]) -> tuple[dict[str, str], list[str]]:

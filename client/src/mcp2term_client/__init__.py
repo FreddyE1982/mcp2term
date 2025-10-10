@@ -10,9 +10,19 @@ from .intro import (
     register_intro_section_provider,
     render_intro_message,
 )
+from .file_command import (
+    FileCommandError,
+    FileCommandHelp,
+    FileCommandParseError,
+    ManageFileCommand,
+    parse_manage_file_command,
+    render_manage_file_help,
+)
 from .session import (
     CancelCommandResponse,
     CommandResponse,
+    FileOperationLine,
+    FileOperationResponse,
     SendInputResponse,
     RemoteMcpSession,
     RemoteMcpSessionError,
@@ -24,6 +34,8 @@ __all__ = [
     "BackpressureMonitor",
     "CancelCommandResponse",
     "CommandResponse",
+    "FileOperationLine",
+    "FileOperationResponse",
     "SendInputResponse",
     "InputChunk",
     "InputReader",
@@ -40,4 +52,10 @@ __all__ = [
     "RemoteMcpSessionError",
     "RemoteShellState",
     "XonshShellRunner",
+    "FileCommandError",
+    "FileCommandHelp",
+    "FileCommandParseError",
+    "ManageFileCommand",
+    "parse_manage_file_command",
+    "render_manage_file_help",
 ]
