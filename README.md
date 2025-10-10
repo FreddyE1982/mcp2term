@@ -8,6 +8,7 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 - **Live streaming** of stdout and stderr via MCP log notifications so clients observe progress as it happens.
 - **Robust chunked streaming** that handles large stdout/stderr volumes without blocking or truncation.
 - **Plugin architecture** that exposes every function, class, and variable defined in the package, enabling extensions to observe command lifecycles or inject custom behaviour.
+- **Remote file management** tools allowing safe file creation, printing, line-range replacement, and exact line lookups via the `manage_file` tool and `mcp.file` client command.
 - **Automatic ngrok tunneling** so HTTP transports are reachable without additional manual setup.
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
 - **Structured tool responses** including timing information to make results easy for agents to consume.
@@ -110,9 +111,21 @@ class ShellEchoPlugin(PluginProtocol):
     def activate(self, registry: PluginRegistry):
         registry.register_command_listener(EchoListener())
 
+        class AuditListener:
+            async def on_file_operation(self, event):
+                print(f"{event.operation} {event.path}: {event.result.message}")
+
+        registry.register_file_operation_listener(AuditListener())
+
 
 PLUGIN = ShellEchoPlugin()
 ```
+
+Listeners registered through `register_file_operation_listener` receive `FileOperationEvent`
+instances containing the original request arguments, the resolved path, the
+`FileOperationResult`, and any warning emitted during processing. This makes it
+straightforward to build auditing, notification, or synchronization plugins that
+react to remote edits in real time without modifying the core server.
 
 ## Development
 

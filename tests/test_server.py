@@ -1,11 +1,18 @@
 """Tests for the MCP server factory and plugin exposure."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from mcp2term.config import ServerConfig
-from mcp2term.plugin import PluginManager, PluginRegistry, ServerWarningEvent
+from mcp2term.files import FileOperationResult
+from mcp2term.plugin import (
+    FileOperationEvent,
+    PluginManager,
+    PluginRegistry,
+    ServerWarningEvent,
+)
 from mcp2term.server import create_server
 
 
@@ -16,6 +23,7 @@ def test_server_registers_run_command_tool(use_real_dependencies: bool) -> None:
     tool_names = {tool.name for tool in tools}
     assert "run_command" in tool_names
     assert "cancel_command" in tool_names
+    assert "manage_file" in tool_names
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -32,6 +40,14 @@ class WarningRecorder:
         self.events: list[ServerWarningEvent] = []
 
     async def on_server_warning(self, event: ServerWarningEvent) -> None:
+        self.events.append(event)
+
+
+class FileOperationRecorder:
+    def __init__(self) -> None:
+        self.events: list[FileOperationEvent] = []
+
+    async def on_file_operation(self, event: FileOperationEvent) -> None:
         self.events.append(event)
 
 
@@ -54,3 +70,35 @@ def test_plugin_manager_emits_warning_event() -> None:
     assert recorder.events
     assert recorder.events[0].tool_name == "run_command"
     assert recorder.events[0].message == "failure"
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_plugin_manager_emits_file_operation_event(tmp_path: Path, use_real_dependencies: bool) -> None:
+    manager = PluginManager()
+    recorder = FileOperationRecorder()
+    PluginRegistry(manager).register_file_operation_listener(recorder)
+
+    result = FileOperationResult(
+        path=tmp_path / "demo.txt",
+        operation="create",
+        success=True,
+        changed=True,
+        encoding="utf-8",
+        message="created",
+        content="hello",
+    )
+    event = FileOperationEvent(
+        raw_path="demo.txt",
+        operation="create",
+        arguments={"path": "demo.txt", "encoding": "utf-8"},
+        result=result,
+    )
+
+    asyncio.run(manager.emit_file_operation(event))
+
+    assert len(recorder.events) == 1
+    recorded = recorder.events[0]
+    assert recorded.result is result
+    assert recorded.result.encoding == "utf-8"
+    assert recorded.raw_path == "demo.txt"
+    assert recorded.arguments["path"] == "demo.txt"

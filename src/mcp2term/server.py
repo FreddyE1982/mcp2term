@@ -8,13 +8,20 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
 from .config import ServerConfig
-from .plugin import GlobalPluginManager, PluginManager, ServerWarningEvent
+from .files import FileEditor, FileOperationError, FileOperationResult
+from .plugin import (
+    FileOperationEvent,
+    GlobalPluginManager,
+    PluginManager,
+    ServerWarningEvent,
+)
 from .shell import CommandExecutionError, CommandResult, CommandTimeoutError, ShellCommandExecutor
 from .streaming import CommandCompleteEvent, utcnow
 
@@ -351,7 +358,7 @@ def create_server(
         state = ctx.request_context.lifespan_context
         details = {"command_id": command_id, "data_length": len(payload), "eof": eof}
         try:
-            accepted = await ctx.request_context.lifespan_context.executor.send_stdin(
+            accepted = await state.executor.send_stdin(
                 command_id,
                 payload,
                 eof=eof,
@@ -387,5 +394,180 @@ def create_server(
             )
             response = _append_warning(response, warning)
         return response
+
+    @server.tool(
+        name="manage_file",
+        description=(
+            "Create, edit, and inspect files on the remote host including line-based operations."
+        ),
+    )
+    async def manage_file(  # type: ignore[no-redef]
+        path: str,
+        *,
+        operation: str,
+        content: str | None = None,
+        line: int | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        encoding: str = "utf-8",
+        create_parents: bool = False,
+        overwrite: bool = False,
+        create_if_missing: bool = True,
+        ctx: Context[ServerSession, ApplicationState],
+    ) -> dict[str, Any]:
+        state = ctx.request_context.lifespan_context
+        editor = FileEditor(state.config.working_directory)
+        resolved_path = editor.resolve_path(path)
+
+        request_arguments: dict[str, Any] = {
+            "path": path,
+            "encoding": encoding,
+            "create_parents": create_parents,
+            "overwrite": overwrite,
+            "create_if_missing": create_if_missing,
+            "resolved_path": str(resolved_path),
+        }
+        if content is not None:
+            request_arguments["content"] = content
+        if line is not None:
+            request_arguments["line"] = line
+        if start_line is not None:
+            request_arguments["start_line"] = start_line
+        if end_line is not None:
+            request_arguments["end_line"] = end_line
+
+        def _failure(message: str) -> FileOperationResult:
+            return FileOperationResult(
+                path=resolved_path,
+                operation=operation,
+                success=False,
+                changed=False,
+                encoding=encoding,
+                message=message,
+            )
+
+        async def _notify_plugins(
+            result: FileOperationResult,
+            *,
+            warning: str | None = None,
+        ) -> None:
+            await state.plugin_manager.emit_file_operation(
+                FileOperationEvent(
+                    raw_path=path,
+                    operation=operation,
+                    arguments=MappingProxyType(dict(request_arguments)),
+                    result=result,
+                    warning=warning,
+                )
+            )
+
+        try:
+            match operation:
+                case "create":
+                    result = editor.create_file(
+                        path,
+                        text=content,
+                        overwrite=overwrite,
+                        create_parents=create_parents,
+                        encoding=encoding,
+                    )
+                case "write":
+                    result = editor.write_file(
+                        path,
+                        text=content or "",
+                        create_parents=create_parents,
+                        encoding=encoding,
+                    )
+                case "append":
+                    if content is None:
+                        raise FileOperationError("Append operation requires content text")
+                    result = editor.append_text(
+                        path,
+                        text=content,
+                        encoding=encoding,
+                        create_if_missing=create_if_missing,
+                    )
+                case "insert":
+                    if line is None:
+                        raise FileOperationError("Insert operation requires a line number")
+                    if content is None:
+                        raise FileOperationError("Insert operation requires content text")
+                    result = editor.insert_lines(
+                        path,
+                        line=line,
+                        text=content,
+                        encoding=encoding,
+                    )
+                case "replace":
+                    if start_line is None:
+                        raise FileOperationError("Replace operation requires start_line")
+                    effective_end = end_line or start_line
+                    result = editor.replace_range(
+                        path,
+                        start_line=start_line,
+                        end_line=effective_end,
+                        text=content or "",
+                        encoding=encoding,
+                    )
+                case "delete":
+                    if start_line is None:
+                        raise FileOperationError("Delete operation requires start_line")
+                    effective_end = end_line or start_line
+                    result = editor.delete_range(
+                        path,
+                        start_line=start_line,
+                        end_line=effective_end,
+                        encoding=encoding,
+                    )
+                case "print":
+                    result = editor.read_lines(
+                        path,
+                        start_line=start_line,
+                        end_line=end_line,
+                        encoding=encoding,
+                    )
+                case "locate":
+                    if content is None:
+                        raise FileOperationError("Locate operation requires content text")
+                    result = editor.find_line_numbers(
+                        path,
+                        text=content,
+                        encoding=encoding,
+                    )
+                case _:
+                    raise FileOperationError(f"Unsupported file operation: {operation}")
+        except FileOperationError as exc:
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="manage_file",
+                base_message=str(exc),
+                exception=None,
+                details={
+                    "path": str(resolved_path),
+                    "operation": operation,
+                },
+            )
+            failure = _failure(str(exc))
+            await _notify_plugins(failure, warning=warning)
+            return _append_warning(failure.to_payload(), warning)
+        except Exception as exc:  # pragma: no cover - defensive
+            warning = await _emit_server_warning(
+                ctx,
+                state,
+                tool_name="manage_file",
+                base_message="Unexpected failure during file operation",
+                exception=exc,
+                details={
+                    "path": str(resolved_path),
+                    "operation": operation,
+                },
+            )
+            failure = _failure(warning)
+            await _notify_plugins(failure, warning=warning)
+            return _append_warning(failure.to_payload(), warning)
+
+        await _notify_plugins(result)
+        return result.to_payload()
 
     return server
