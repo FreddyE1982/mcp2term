@@ -1025,6 +1025,26 @@ def _normalise_patch_path(
     return (base / candidate).resolve()
 
 
+def _line_matches(original: str, patch_text: str) -> bool:
+    """Return ``True`` when ``original`` matches ``patch_text``.
+
+    Unified diff payloads omit the trailing newline when the patch source or
+    destination file lacked one. The current file may legitimately contain the
+    newline because another tool normalised the file after the patch was
+    generated. This helper treats a missing trailing newline in either operand as
+    a non-fatal difference so patches remain resilient to newline normalisation
+    without silently masking substantive mismatches.
+    """
+
+    if original == patch_text:
+        return True
+    if original.endswith("\n") and not patch_text.endswith("\n"):
+        return original[:-1] == patch_text
+    if patch_text.endswith("\n") and not original.endswith("\n"):
+        return patch_text[:-1] == original
+    return False
+
+
 def _apply_unified_patch(
     original_text: str,
     patch: UnifiedDiffFilePatch,
@@ -1047,22 +1067,27 @@ def _apply_unified_patch(
             if line.tag == " ":
                 if index >= len(original_lines):
                     raise FileOperationError("Patch context extends past end of file")
-                if original_lines[index] != line.text:
+                candidate = original_lines[index]
+                if not _line_matches(candidate, line.text):
                     raise FileOperationError(
                         "Patch context does not match file contents",
                     )
-                result_lines.append(original_lines[index])
+                result_lines.append(candidate)
                 index += 1
             elif line.tag == "-":
                 if index >= len(original_lines):
                     raise FileOperationError("Patch deletion extends past end of file")
-                if original_lines[index] != line.text:
+                candidate = original_lines[index]
+                if not _line_matches(candidate, line.text):
                     raise FileOperationError(
                         "Patch deletion does not match file contents",
                     )
                 index += 1
             elif line.tag == "+":
-                result_lines.append(line.text)
+                addition = line.text
+                if not addition.endswith("\n") and index < len(original_lines):
+                    addition = addition + "\n"
+                result_lines.append(addition)
             else:
                 raise FileOperationError(f"Unsupported patch line tag: {line.tag}")
 

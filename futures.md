@@ -117,3 +117,12 @@
   diagnostics (such as process tree snapshots) should be emitted. Provide documentation
   so administrators understand how to register policies and expose sample templates for
   common operations, including localisation examples.
+
+## Spinner filtering policy hooks
+- **Purpose:** Allow deployments to customise which transient spinner characters are
+  suppressed while console echoing is paused, ensuring real diagnostic punctuation is
+  not inadvertently filtered.
+- **Usage:** Expose a configuration surface on `ConsoleStreamProxy` and matching server
+  configuration to override the default spinner fragment set or disable filtering.
+  Provide plugin hooks so environments that rely on bespoke progress indicators can
+  register additional characters or entirely custom suppression logic at runtime.
