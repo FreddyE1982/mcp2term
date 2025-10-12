@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing
 import os
+import secrets
+import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import weakref
-from datetime import datetime
-from multiprocessing import Process
-from multiprocessing.queues import Queue as MultiprocessingQueue
-from queue import Empty
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from multiprocessing.connection import Connection, Listener
 from types import MappingProxyType
 from typing import Any
 
@@ -25,6 +25,12 @@ from anyio.abc import TaskGroup as AnyIOTaskGroup
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
+from .chat_bridge import (
+    ChatBridgeEnvelope,
+    ENVELOPE_KIND_APPEND,
+    ENVELOPE_KIND_MESSAGE,
+    ENVELOPE_KIND_STOP,
+)
 from .config import ServerConfig
 from .files import FileEditor, FileOperationError, FileOperationResult
 from .plugin import (
@@ -41,17 +47,137 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class ChatBridgeEnvelope:
-    """Container for inter-process chat bridge messages."""
+class TerminalLaunchPlan:
+    """Describe how to start the auxiliary terminal chat interface."""
 
-    kind: str
-    payload: str | None = None
+    command: list[str]
+    track_process: bool = True
 
 
-_ENVELOPE_KIND_MESSAGE = "message"
-_ENVELOPE_KIND_STOP = "stop"
-_ENVELOPE_KIND_SHUTDOWN = "shutdown"
-_ENVELOPE_KIND_APPEND = "append"
+class SystemTerminalLauncher:
+    """Launch a new terminal window for the interactive chat console.
+
+    The launcher inspects the current operating system and environment to
+    select an appropriate terminal emulator. Operators can override the
+    automatic detection by setting ``MCP2TERM_CHAT_TERMINAL`` to an explicit
+    command. Setting the variable to ``disable`` (or similar synonyms) skips
+    the auxiliary console entirely which mirrors the behaviour of the old
+    PyQt bridge when no display server was available.
+    """
+
+    _DISABLE_VALUES = {"disable", "disabled", "off", "none", "false", "0"}
+
+    def __init__(self, *, environment: Mapping[str, str] | None = None) -> None:
+        env = dict(os.environ if environment is None else environment)
+        self._environment = MappingProxyType(env)
+
+    def prepare_plan(self, script_invocation: Sequence[str], *, title: str) -> TerminalLaunchPlan | None:
+        """Return a launch plan or ``None`` when a terminal cannot be located."""
+
+        override = self._environment.get("MCP2TERM_CHAT_TERMINAL")
+        if override:
+            normalized = override.strip()
+            if normalized.lower() in self._DISABLE_VALUES:
+                return None
+            return TerminalLaunchPlan(command=shlex.split(override) + list(script_invocation))
+
+        if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
+            return self._prepare_linux_plan(script_invocation, title)
+        if sys.platform == "darwin":
+            return self._prepare_macos_plan(script_invocation, title)
+        if os.name == "nt":
+            return self._prepare_windows_plan(script_invocation, title)
+        return None
+
+    def launch(
+        self,
+        plan: TerminalLaunchPlan,
+        *,
+        extra_environment: Mapping[str, str] | None = None,
+    ) -> subprocess.Popen[str] | None:
+        """Execute ``plan`` and return the spawned process when trackable."""
+
+        env = dict(os.environ)
+        if extra_environment is not None:
+            env.update(dict(extra_environment))
+
+        popen_kwargs: dict[str, Any] = {"env": env, "close_fds": True}
+        if os.name == "nt":  # pragma: no cover - platform specific branch
+            creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            popen_kwargs["creationflags"] = creation_flags
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        try:
+            process = subprocess.Popen(plan.command, **popen_kwargs)
+        except FileNotFoundError:
+            logger.exception("Unable to start chat terminal; command missing: %s", plan.command)
+            return None
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("Unexpected error while starting chat terminal: %s", plan.command)
+            return None
+
+        return process if plan.track_process else None
+
+    def terminate(self, process: subprocess.Popen[str] | None) -> None:
+        """Attempt to terminate the terminal process if still active."""
+
+        if process is None:
+            return
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+        except Exception:  # pragma: no cover - terminal already closed
+            logger.debug("Terminal process already terminated during shutdown")
+
+    def _prepare_linux_plan(
+        self,
+        script_invocation: Sequence[str],
+        title: str,
+    ) -> TerminalLaunchPlan | None:
+        invocation = list(script_invocation)
+        candidates = [
+            ("x-terminal-emulator", ["-T", title, "-e"]),
+            ("gnome-terminal", ["--title", title, "--"]),
+            ("konsole", ["--new-tab", "-p", f"tabtitle={title}", "-e"]),
+            ("kitty", ["--title", title]),
+            ("alacritty", ["-t", title, "-e"]),
+            ("wezterm", ["start", "--title", title, "--"]),
+            ("xterm", ["-T", title, "-e"]),
+        ]
+        for executable, args in candidates:
+            if shutil.which(executable):
+                if args and args[-1] == "-e":
+                    command = [executable, *args, *invocation]
+                else:
+                    command = [executable, *args, *invocation]
+                return TerminalLaunchPlan(command=command)
+        return None
+
+    def _prepare_macos_plan(
+        self,
+        script_invocation: Sequence[str],
+        title: str,
+    ) -> TerminalLaunchPlan | None:
+        command = " ".join(shlex.quote(part) for part in script_invocation)
+        osa_lines = [
+            "tell application \"Terminal\" to activate",
+            f"tell application \"Terminal\" to do script \"{command}\"",
+            f"tell application \"Terminal\" to set custom title of front window to \"{title}\"",
+        ]
+        return TerminalLaunchPlan(
+            command=["osascript", *[item for line in osa_lines for item in ("-e", line)]],
+            track_process=False,
+        )
+
+    def _prepare_windows_plan(
+        self,
+        script_invocation: Sequence[str],
+        title: str,
+    ) -> TerminalLaunchPlan | None:
+        command = ["cmd.exe", "/c", "start", f"\"{title}\"", *script_invocation]
+        return TerminalLaunchPlan(command=command, track_process=False)
 
 
 @dataclass(slots=True)
@@ -65,49 +191,37 @@ class ApplicationState:
 
 
 class UserChatBridge:
-    """Coordinate the optional PyQt5-based chat window for server-side messaging.
+    """Coordinate the auxiliary terminal console for server-side messaging.
 
-    The bridge spins up a PyQt5 user interface within a dedicated helper process
-    whenever the environment provides a display server and the :mod:`PyQt5`
-    package is available. Messages entered into the window propagate to all
-    connected MCP sessions as informational log events prefixed with the
-    mandatory alert text.
-
-    The implementation purposely avoids monkey patching or simulation so the
-    live server infrastructure remains untouched. Message dispatch occurs via
-    ``ServerSession.send_log_message`` to ensure ordering with existing log
-    streams and stdout/stderr output generated by running commands.
+    The bridge spawns a new terminal window hosting :mod:`mcp2term.chat_terminal`
+    so administrators can broadcast messages to every connected MCP client. The
+    helper process communicates with the main server via a
+    :class:`multiprocessing.connection.Listener` socket, ensuring that messages
+    travel through the same ordering guarantees as command output without
+    resorting to GUI toolkits.
     """
 
     _MESSAGE_PREFIX = "[MESSAGE FROM USER. DO NOT IGNORE:]"
-    _SENTINEL = object()
+    _HISTORY_HEADER = "[delivered]"
 
-    def __init__(self, *, plugin_manager: PluginManager, console_echo: bool) -> None:
+    def __init__(
+        self,
+        *,
+        plugin_manager: PluginManager,
+        console_echo: bool,
+        terminal_launcher: SystemTerminalLauncher | None = None,
+    ) -> None:
         self._plugin_manager = plugin_manager
         self._console_echo = console_echo
-        self._message_queue: MultiprocessingQueue[ChatBridgeEnvelope] | None = None
-        self._control_queue: MultiprocessingQueue[ChatBridgeEnvelope] | None = None
+        self._terminal_launcher = terminal_launcher or SystemTerminalLauncher()
         self._sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
-        self._gui_process: Process | None = None
         self._task_group: AnyIOTaskGroup | None = None
         self._active = False
         self._pump_cancel_scope: anyio.CancelScope | None = None
-        self._qt_available = False
-        self._initialize_qt_support()
-
-    def _initialize_qt_support(self) -> None:
-        """Attempt to import PyQt5 and confirm a GUI display is available."""
-
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-            logger.warning("User chat window disabled because DISPLAY is not set.")
-            return
-        try:  # pragma: no cover - GUI components are not exercised in tests
-            from PyQt5 import QtCore, QtWidgets  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency
-            logger.warning("PyQt5 is unavailable; user chat window disabled: %s", exc)
-            return
-
-        self._qt_available = True
+        self._listener: Listener | None = None
+        self._auth_key: bytes | None = None
+        self._connection: Connection | None = None
+        self._terminal_process: subprocess.Popen[str] | None = None
 
     @property
     def is_active(self) -> bool:
@@ -129,30 +243,41 @@ class UserChatBridge:
         self._sessions.add(session)
 
     async def __aenter__(self) -> "UserChatBridge":
-        """Start background tasks and GUI helper process when PyQt5 support is present."""
+        """Start background tasks and spawn the terminal console when possible."""
 
-        if not self._qt_available:
-            logger.info("User chat bridge inactive: PyQt5 support not detected.")
+        try:
+            plan, address = self._prepare_launch_plan()
+        except Exception as exc:  # pragma: no cover - defensive startup logging
+            logger.warning("User chat bridge inactive: %s", exc)
+            self._cleanup_listener()
             self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
             return self
 
-        self._message_queue = multiprocessing.Queue()
-        self._control_queue = multiprocessing.Queue()
+        if plan is None:
+            logger.info("User chat bridge inactive: no compatible terminal command detected.")
+            self._cleanup_listener()
+            self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
+            return self
+
         self._task_group = await anyio.create_task_group().__aenter__()
         try:
-            self._task_group.start_soon(self._message_pump)
-            self._start_gui_process()
+            self._task_group.start_soon(self._run_listener)
+            self._terminal_process = self._terminal_launcher.launch(plan)
         except Exception:
             await self._shutdown_tasks()
             raise
         else:
             self._active = True
             self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
-            logger.info("User chat bridge initialised with PyQt5 user interface.")
+            logger.info(
+                "User chat bridge initialised with terminal console bound to %s:%s.",
+                address[0],
+                address[1],
+            )
         return self
 
     async def __aexit__(self, exc_type, exc, exc_tb) -> None:
-        """Shut down the GUI helper process and message pump."""
+        """Shut down the terminal console and background listener."""
 
         await self._shutdown_tasks()
 
@@ -161,83 +286,120 @@ class UserChatBridge:
 
         if self._pump_cancel_scope is not None:
             self._pump_cancel_scope.cancel()
-        if self._message_queue is not None:
-            try:
-                self._message_queue.put_nowait(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
-            except Exception:  # pragma: no cover - defensive logging
-                logger.exception("Failed to notify message pump about shutdown")
-        if self._control_queue is not None:
-            try:
-                self._control_queue.put_nowait(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_SHUTDOWN))
-            except Exception:  # pragma: no cover - defensive logging
-                logger.exception("Failed to notify PyQt process about shutdown")
+
+        await self._send_control_envelope(ChatBridgeEnvelope(kind=ENVELOPE_KIND_STOP))
 
         if self._task_group is not None:
             await self._task_group.__aexit__(None, None, None)
             self._task_group = None
 
-        if self._gui_process is not None:
-            self._gui_process.join(timeout=5)
-            if self._gui_process.is_alive():
-                self._gui_process.terminate()
-                self._gui_process.join(timeout=2)
-            self._gui_process = None
+        if self._terminal_process is not None:
+            self._terminal_launcher.terminate(self._terminal_process)
+            self._terminal_process = None
+
+        self._cleanup_listener()
 
         self._plugin_manager.register_export("mcp2term.user_chat.bridge", None)
         self._active = False
-        if self._message_queue is not None:
-            self._message_queue.close()
-            self._message_queue.join_thread()
-        if self._control_queue is not None:
-            self._control_queue.close()
-            self._control_queue.join_thread()
-        self._message_queue = None
-        self._control_queue = None
         self._sessions = weakref.WeakSet()
         self._pump_cancel_scope = None
+        self._connection = None
+        self._auth_key = None
 
-    def _start_gui_process(self) -> None:
-        """Launch the PyQt5 UI loop inside a dedicated helper process."""
+    def _cleanup_listener(self) -> None:
+        """Close any open listener socket associated with the bridge."""
 
-        if not self._qt_available:
+        if self._listener is not None:
+            try:
+                self._listener.close()
+            except Exception:  # pragma: no cover - listener already closed
+                logger.debug("Chat bridge listener already closed during cleanup")
+            self._listener = None
+
+    def _prepare_launch_plan(self) -> tuple[TerminalLaunchPlan | None, tuple[str, int]]:
+        """Create the listener and compute the terminal launch plan."""
+
+        self._auth_key = secrets.token_bytes(32)
+        self._listener = Listener(("127.0.0.1", 0), authkey=self._auth_key)
+        address = self._listener.address
+        if not isinstance(address, tuple) or len(address) != 2:
+            raise RuntimeError("Listener provided an unexpected address format")
+        host = str(address[0])
+        port = int(address[1])
+        script_invocation = [
+            sys.executable,
+            "-m",
+            "mcp2term.chat_terminal",
+            "--address",
+            host,
+            "--port",
+            str(port),
+            "--auth-key",
+            self._auth_key.hex(),
+            "--history-header",
+            self._HISTORY_HEADER,
+        ]
+        plan = self._terminal_launcher.prepare_plan(script_invocation, title="mcp2term Chat Console")
+        return plan, (host, port)
+
+    async def _run_listener(self) -> None:
+        """Accept connections from the auxiliary terminal and relay messages."""
+
+        listener = self._listener
+        if listener is None:
             return
-        if self._message_queue is None or self._control_queue is None:
-            raise RuntimeError("Chat bridge queues must be initialised before starting the GUI process")
-        if self._gui_process is not None and self._gui_process.is_alive():
-            return
-
-        self._gui_process = Process(
-            target=_run_pyqt_bridge_process,
-            name="mcp2term-user-chat-ui",
-            daemon=True,
-            args=(self._message_queue, self._control_queue),
-        )
-        self._gui_process.start()
-
-    async def _message_pump(self) -> None:
-        """Continuously deliver user messages to all tracked sessions."""
-
-        queue = self._message_queue
-        if queue is None:
-            logger.debug("Message pump aborted because queues are uninitialised.")
-            return
-
         with anyio.CancelScope() as scope:
             self._pump_cancel_scope = scope
+            try:
+                connection = await anyio.to_thread.run_sync(listener.accept)
+            except Exception:
+                logger.exception("User chat bridge failed to accept terminal connection")
+                return
+            finally:
+                try:
+                    listener.close()
+                except Exception:  # pragma: no cover - listener already closed
+                    logger.debug("Chat bridge listener already closed after accept")
+                self._listener = None
+
+            self._connection = connection
+            await self._send_control_envelope(
+                ChatBridgeEnvelope(kind=ENVELOPE_KIND_APPEND, payload="Chat console connected."),
+            )
+
             while True:
                 try:
-                    envelope = await anyio.to_thread.run_sync(queue.get)
-                except (EOFError, OSError):  # pragma: no cover - unexpected transport failure
-                    logger.warning("Chat bridge queue closed unexpectedly; stopping message pump")
+                    envelope = await anyio.to_thread.run_sync(connection.recv)
+                except (EOFError, OSError):
+                    logger.info("Chat console disconnected; stopping listener loop")
                     break
                 if not isinstance(envelope, ChatBridgeEnvelope):
-                    logger.debug("Ignoring unexpected payload from chat bridge: %r", envelope)
+                    logger.debug("Ignoring unexpected payload from chat console: %r", envelope)
                     continue
-                if envelope.kind == _ENVELOPE_KIND_STOP:
+                if envelope.kind == ENVELOPE_KIND_STOP:
                     break
-                if envelope.kind == _ENVELOPE_KIND_MESSAGE and envelope.payload:
+                if envelope.kind == ENVELOPE_KIND_MESSAGE and envelope.payload:
                     await self._broadcast_message(envelope.payload)
+
+            try:
+                connection.close()
+            except Exception:  # pragma: no cover - connection already closed
+                logger.debug("Chat console connection already closed during shutdown")
+
+            self._connection = None
+            self._active = False
         self._pump_cancel_scope = None
+
+    async def _send_control_envelope(self, envelope: ChatBridgeEnvelope) -> None:
+        """Forward ``envelope`` to the terminal console if connected."""
+
+        connection = self._connection
+        if connection is None:
+            return
+        try:
+            await anyio.to_thread.run_sync(connection.send, envelope)
+        except (EOFError, OSError):
+            logger.debug("Unable to deliver control envelope to chat console")
 
     async def _broadcast_message(self, message: str) -> None:
         """Send ``message`` to every connected session as a log entry."""
@@ -260,124 +422,10 @@ class UserChatBridge:
         )
         if self._console_echo:
             print(formatted, flush=True)
+        await self._send_control_envelope(
+            ChatBridgeEnvelope(kind=ENVELOPE_KIND_APPEND, payload=formatted),
+        )
 
-
-def _run_pyqt_bridge_process(
-    message_queue: MultiprocessingQueue[ChatBridgeEnvelope],
-    control_queue: MultiprocessingQueue[ChatBridgeEnvelope],
-) -> None:  # pragma: no cover - requires PyQt5 GUI environment
-    """Entry point executed in a helper process to host the PyQt5 chat window."""
-
-    try:
-        from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
-    except Exception:  # pragma: no cover - defensive import logging
-        logging.exception("Unable to import PyQt5; user chat window will not start")
-        return
-
-    app = QtWidgets.QApplication.instance()
-    created_app = False
-    if app is None:
-        app = QtWidgets.QApplication(["mcp2term-user-chat"])
-        created_app = True
-
-    class ChatWindow(QtWidgets.QMainWindow):
-        """Interactive window emitting chat messages to the parent process."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.setWindowTitle("mcp2term User Message Bridge")
-            self.setMinimumWidth(480)
-            self.setMinimumHeight(320)
-            self._build_interface()
-
-        def _build_interface(self) -> None:
-            container = QtWidgets.QWidget(self)
-            layout = QtWidgets.QVBoxLayout(container)
-
-            headline = QtWidgets.QLabel(
-                (
-                    "Enter a message to broadcast immediately to all connected "
-                    "MCP clients. Messages are delivered as informational log "
-                    "entries and appear inline with command output."
-                ),
-                self,
-            )
-            headline.setWordWrap(True)
-            layout.addWidget(headline)
-
-            self._history = QtWidgets.QTextEdit(self)
-            self._history.setReadOnly(True)
-            self._history.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
-            self._history.setPlaceholderText("No messages have been sent yet.")
-            layout.addWidget(self._history)
-
-            input_row = QtWidgets.QHBoxLayout()
-            self._input = QtWidgets.QLineEdit(self)
-            self._input.setPlaceholderText("Type the message to send to clients...")
-            input_row.addWidget(self._input)
-
-            send_button = QtWidgets.QPushButton("Send", self)
-            input_row.addWidget(send_button)
-            layout.addLayout(input_row)
-
-            container.setLayout(layout)
-            self.setCentralWidget(container)
-
-            send_button.clicked.connect(self._on_send_clicked)  # type: ignore[arg-type]
-            self._input.returnPressed.connect(self._on_send_clicked)  # type: ignore[arg-type]
-
-        def _append_history(self, text: str) -> None:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self._history.append(f"{timestamp}  {text}")
-
-        def _on_send_clicked(self) -> None:
-            text = self._input.text().strip()
-            if not text:
-                return
-            self._input.clear()
-            self._append_history(f"You: {text}")
-            message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_MESSAGE, payload=text))
-
-        def closeEvent(self, event: "QtGui.QCloseEvent") -> None:  # type: ignore[name-defined]
-            event.ignore()
-            self.hide()
-
-    window = ChatWindow()
-    window.show()
-
-    def _drain_control_queue() -> None:
-        while True:
-            try:
-                envelope = control_queue.get_nowait()
-            except Empty:
-                break
-            except (EOFError, OSError):  # pragma: no cover - parent process terminated
-                app.quit()
-                return
-            if isinstance(envelope, ChatBridgeEnvelope):
-                if envelope.kind == _ENVELOPE_KIND_SHUTDOWN:
-                    app.quit()
-                elif envelope.kind == _ENVELOPE_KIND_APPEND and envelope.payload:
-                    window._append_history(envelope.payload)
-            else:  # pragma: no cover - defensive logging
-                logging.getLogger(__name__).debug(
-                    "Ignoring unexpected control payload in PyQt process: %r", envelope
-                )
-
-    poll_timer = QtCore.QTimer()
-    poll_timer.setInterval(100)
-    poll_timer.timeout.connect(_drain_control_queue)  # type: ignore[arg-type]
-    poll_timer.start()
-
-    app.exec_()
-
-    try:
-        message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
-    except Exception:  # pragma: no cover - queue already closed
-        logging.getLogger(__name__).debug("Unable to notify parent about PyQt shutdown")
-
-    if created_app:
-        app.quit()
 
 
 def _serialize_result(result: CommandResult, *, timed_out: bool) -> dict[str, Any]:

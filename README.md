@@ -13,6 +13,7 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
 - **Structured tool responses** including timing information to make results easy for agents to consume.
 - **Console mirroring** so operators always see the command stream, stdout, and stderr on the hosting terminal by default.
+- **Dedicated chat console** that opens in a separate terminal window, allowing supervisors to broadcast messages to every connected MCP client without relying on a graphical toolkit.
 
 ## Installation
 
@@ -36,6 +37,7 @@ The project targets Python 3.12 or newer.
 | `MCP2TERM_COMMAND_TIMEOUT` | Default timeout in seconds for commands. | unlimited |
 | `MCP2TERM_STREAM_CHUNK_SIZE` | Bytes read from stdout/stderr per chunk while streaming. | `65536` |
 | `MCP2TERM_CONSOLE_ECHO` | Mirror commands and output to the server console (`true`/`false`). | `true` |
+| `MCP2TERM_CHAT_TERMINAL` | Override the command used to launch the auxiliary chat terminal or set to `disabled` to skip it. | *(auto-detect)* |
 
 ## Running the server
 
