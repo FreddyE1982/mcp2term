@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping
+from typing import Awaitable, Callable, Final, Mapping
 from uuid import uuid4
 
 from mcp.server.fastmcp import Context
@@ -33,7 +33,7 @@ from .streaming import (
 
 logger = logging.getLogger(__name__)
 
-_LONG_RUNNING_NOTICE = "COMANND STILL PROCESSING. PLEASE WAIT"
+_LONG_RUNNING_NOTICE: Final[str] = "COMMAND STILL PROCESSING. PLEASE WAIT"
 
 
 @dataclass(slots=True)
@@ -301,6 +301,8 @@ class ShellCommandExecutor:
                 process.kill()
                 await process.wait()
                 raise
+            finally:
+                command_completed.set()
 
             if stdout_task is None:
                 stdout_text = ""
@@ -416,33 +418,45 @@ class ShellCommandExecutor:
 
         normalized_delay = max(0.0, float(delay))
         normalized_interval = max(0.0, float(interval))
+
         try:
-            if normalized_delay > 0:
-                try:
-                    await asyncio.wait_for(completion_event.wait(), timeout=normalized_delay)
-                    return
-                except asyncio.TimeoutError:
-                    pass
-            elif completion_event.is_set():
+            if await self._wait_for_completion_or_timeout(completion_event, normalized_delay):
                 return
 
-            while not completion_event.is_set():
-                await emitter.emit_progress_notice(_LONG_RUNNING_NOTICE)
+            while True:
                 if completion_event.is_set():
-                    break
-                if normalized_interval <= 0:
-                    await asyncio.sleep(0)
-                    continue
-                try:
-                    await asyncio.wait_for(completion_event.wait(), timeout=normalized_interval)
-                except asyncio.TimeoutError:
-                    continue
+                    return
+                await emitter.emit_progress_notice(_LONG_RUNNING_NOTICE)
+                if await self._wait_for_completion_or_timeout(
+                    completion_event, normalized_interval
+                ):
+                    return
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
                 "Error while emitting long-running command notices for %s", emitter.request.command_id
             )
+
+    async def _wait_for_completion_or_timeout(
+        self,
+        completion_event: asyncio.Event,
+        duration: float,
+    ) -> bool:
+        """Return ``True`` when the completion event is set before ``duration`` elapses."""
+
+        if completion_event.is_set():
+            return True
+
+        if duration <= 0:
+            await asyncio.sleep(0)
+            return completion_event.is_set()
+
+        try:
+            await asyncio.wait_for(completion_event.wait(), timeout=duration)
+            return True
+        except asyncio.TimeoutError:
+            return completion_event.is_set()
 
     async def send_signal(self, command_id: str, sig: int = signal.SIGINT) -> bool:
         """Send ``sig`` to the running command identified by ``command_id``."""
