@@ -79,6 +79,28 @@ Use `send_stdin` to stream additional input to an interactive command. The tool 
 that closes the stdin pipe once all required data has been delivered. The response reports whether the input was accepted so
 clients can retry or surface helpful diagnostics.
 
+`manage_file(path: str, *, operation: str, content: Optional[str] = None, line: Optional[int] = None, start_line: Optional[int] = None, end_line: Optional[int] = None, encoding: str = "utf-8", create_parents: bool = False, overwrite: bool = False, create_if_missing: bool = True, escape_profile: str = "auto")`
+
+`manage_file` powers the `filetool` client command and exposes a broad suite of line-aware editing operations. The `escape_profile`
+parameter controls how inline `--content` payloads are normalised before they reach the server:
+
+- `auto` (default) mirrors the original behaviour and expands `\n`, `\t`, `\r`, and `\0` sequences when the payload would otherwise be a single line.
+- `none` disables all inline decoding so payloads arrive exactly as typed, perfect for binary-friendly workflows or when backslashes carry semantic meaning.
+- Additional profiles can be registered by extensions to enforce organisation-specific escaping rules. The selected profile is forwarded to plugins via the `FileOperationEvent` payload so observability tooling can respond appropriately.
+
+Example usages:
+
+```bash
+# Create a multi-line file from a single-shell command using the default profile.
+filetool write docs/roadmap.txt --content 'phase-one\\nphase-two\\nphase-three'
+
+# Append literal escape sequences without rewriting them by selecting the "none" profile.
+filetool append docs/roadmap.txt --content 'literal\\nvalue' --escape-profile none
+
+# Use stdin for bulk updates while still labelling the request for plugins.
+cat release.diff | filetool patch docs/roadmap.txt --stdin --escape-profile auto
+```
+
 ## Plugins
 
 Plugins implement the `PluginProtocol` (via a module-level `PLUGIN` object) and can register `CommandStreamListener` instances to observe command lifecycle events. When the server starts it loads modules listed in `MCP2TERM_PLUGINS`, exposing the entire `mcp2term` namespace through the plugin registry for inspection or extension.

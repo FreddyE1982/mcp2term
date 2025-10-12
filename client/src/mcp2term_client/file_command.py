@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence, TextIO
@@ -14,7 +15,10 @@ __all__ = [
     "FileCommandHelp",
     "FileCommandParseError",
     "ManageFileCommand",
+    "EscapeProfileContext",
+    "list_escape_profiles",
     "parse_manage_file_command",
+    "register_escape_profile",
     "render_manage_file_help",
 ]
 
@@ -30,6 +34,15 @@ _ALLOWED_OPERATIONS = (
     "replace",
     "write",
 )
+
+_INLINE_CONTENT_OPERATIONS = frozenset({
+    "append",
+    "create",
+    "insert",
+    "patch",
+    "replace",
+    "write",
+})
 
 _ESCAPE_SEQUENCE_PATTERN = re.compile(r"\\([nrt0])")
 
@@ -66,6 +79,97 @@ def _should_decode_inline_escape_sequences(text: str) -> bool:
     return _ESCAPE_SEQUENCE_PATTERN.search(text) is not None
 
 
+@dataclass(slots=True)
+class EscapeProfileContext:
+    """Context describing when an escape profile is being applied."""
+
+    operation: str
+    namespace: argparse.Namespace
+
+
+EscapeProfileHandler = Callable[[str, EscapeProfileContext], str]
+
+
+_ESCAPE_PROFILE_HANDLERS: dict[str, EscapeProfileHandler] = {}
+
+
+def register_escape_profile(
+    name: str,
+    handler: EscapeProfileHandler,
+    *,
+    replace: bool = False,
+) -> None:
+    """Register a new inline escape decoding profile.
+
+    Parameters
+    ----------
+    name:
+        Human readable identifier referenced by the ``--escape-profile`` flag.
+    handler:
+        Callable responsible for transforming inline content based on the
+        provided :class:`EscapeProfileContext`.
+    replace:
+        When ``True`` an existing profile with the same name is overwritten.
+
+    Raises
+    ------
+    ValueError
+        Raised when ``name`` is empty/whitespace only, ``handler`` is not
+        callable, or the profile already exists without ``replace`` enabled.
+    """
+
+    if not callable(handler):  # pragma: no cover - defensive guard
+        raise ValueError("Escape profile handler must be callable")
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("Escape profile name must not be empty")
+    if not replace and normalized in _ESCAPE_PROFILE_HANDLERS:
+        raise ValueError(f"Escape profile '{normalized}' is already registered")
+    _ESCAPE_PROFILE_HANDLERS[normalized] = handler
+
+
+def list_escape_profiles() -> tuple[str, ...]:
+    """Return the registered escape profile names in alphabetical order."""
+
+    return tuple(sorted(_ESCAPE_PROFILE_HANDLERS))
+
+
+def _normalize_escape_profile(name: str, *, usage: str | None = None) -> str:
+    normalized = name.strip().lower()
+    if not normalized:
+        raise FileCommandParseError(
+            "--escape-profile requires a non-empty value",
+            usage=usage,
+        )
+    if normalized not in _ESCAPE_PROFILE_HANDLERS:
+        available = ", ".join(list_escape_profiles()) or "<none>"
+        raise FileCommandParseError(
+            f"Unknown escape profile '{name}'. Available profiles: {available}",
+            usage=usage,
+        )
+    return normalized
+
+
+def _auto_escape_profile_handler(text: str, context: EscapeProfileContext) -> str:
+    if context.operation in _INLINE_CONTENT_OPERATIONS and _should_decode_inline_escape_sequences(text):
+        return _decode_inline_escape_sequences(text)
+    return text
+
+
+def _literal_escape_profile_handler(text: str, _context: EscapeProfileContext) -> str:
+    return text
+
+
+def _ensure_builtin_profiles_registered() -> None:
+    if "auto" not in _ESCAPE_PROFILE_HANDLERS:
+        register_escape_profile("auto", _auto_escape_profile_handler)
+    if "none" not in _ESCAPE_PROFILE_HANDLERS:
+        register_escape_profile("none", _literal_escape_profile_handler)
+
+
+_ensure_builtin_profiles_registered()
+
+
 class FileCommandError(ValueError):
     """Base exception raised when parsing `filetool` arguments."""
 
@@ -100,6 +204,7 @@ class ManageFileCommand:
     create_parents: bool
     overwrite: bool
     create_if_missing: bool
+    escape_profile: str
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -131,6 +236,8 @@ def _create_parser() -> _ArgumentParser:
         add_help=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _ensure_builtin_profiles_registered()
+    available_profiles = ", ".join(list_escape_profiles())
     parser.add_argument("operation", choices=_ALLOWED_OPERATIONS)
     parser.add_argument("path", help="Path to the remote file (relative to the server root).")
     parser.add_argument(
@@ -154,6 +261,14 @@ def _create_parser() -> _ArgumentParser:
         dest="read_stdin",
         action="store_true",
         help="Read content from standard input until EOF.",
+    )
+    parser.add_argument(
+        "--escape-profile",
+        default="auto",
+        help=(
+            "Selects the inline escape decoding strategy. Available profiles: "
+            f"{available_profiles or 'auto, none'}."
+        ),
     )
     parser.add_argument(
         "--encoding",
@@ -240,7 +355,15 @@ def parse_manage_file_command(
 
     operation = namespace.operation
     stdin_stream = stdin if stdin is not None else sys.stdin
-    content = _resolve_content(namespace, stdin_stream, operation=operation)
+    usage = parser.format_usage()
+    escape_profile = _normalize_escape_profile(namespace.escape_profile, usage=usage)
+    namespace.escape_profile = escape_profile
+    content = _resolve_content(
+        namespace,
+        stdin_stream,
+        operation=operation,
+        escape_profile=escape_profile,
+    )
     path = namespace.path
     encoding = namespace.encoding
     line = namespace.line
@@ -260,6 +383,7 @@ def parse_manage_file_command(
         create_parents=bool(namespace.create_parents),
         overwrite=bool(namespace.overwrite),
         create_if_missing=bool(namespace.create_if_missing),
+        escape_profile=escape_profile,
     )
 
 
@@ -268,6 +392,7 @@ def _resolve_content(
     stdin_stream: TextIO,
     *,
     operation: str,
+    escape_profile: str,
 ) -> str | None:
     """Determine the content payload from the parsed namespace."""
 
@@ -290,9 +415,9 @@ def _resolve_content(
 
     if namespace.content is not None:
         content = namespace.content
-        if operation in {"append", "create", "insert", "patch", "replace", "write"} and _should_decode_inline_escape_sequences(content):
-            content = _decode_inline_escape_sequences(content)
-        return content
+        handler = _ESCAPE_PROFILE_HANDLERS[escape_profile]
+        context = EscapeProfileContext(operation=operation, namespace=namespace)
+        return handler(content, context)
     if namespace.content_file is not None:
         path = Path(namespace.content_file).expanduser()
         try:

@@ -123,7 +123,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "Ctrl+C sends the configured interrupt signal to the remote process via the MCP cancellation API.",
         "Backpressure notices warn you whenever output buffering or pending requests build up, so you know when to pause.",
         "Startup diagnostics explain connectivity issues if the Streamable HTTP endpoint cannot be reached.",
-        "Inline escape sequences such as `\\n` and `\\t` are decoded safely so single-line shells can deliver rich multi-line payloads without surprises.",
+        "Inline escape sequences such as `\\n` and `\\t` decode automatically by default, and `--escape-profile` lets you opt into literal or custom decoding strategies without touching server code.",
     ]
 
     special_commands: list[str] = [
@@ -144,6 +144,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "`patch --stdin` or `--content-from-file` applies unified diffs just like the automation-friendly `apply_patch` helper.",
         "Inline patches (including literal `\\ No newline at end of file` markers) round-trip cleanly through the parser and remote workflow thanks to expanded unit and integration coverage.",
         "All file edits emit structured audit events through the plugin registry so operators can observe and extend behaviour.",
+        "`--escape-profile none` bypasses inline decoding entirely so binary-safe payloads and templating DSLs survive transport unchanged, while custom profiles can be registered by plugins.",
     ]
 
     description = (
@@ -157,8 +158,8 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         items=tuple(file_operations),
         description=(
             "File commands map directly to the server's `manage_file` MCP tool. Combine options such as `--encoding`, "
-            "`--create-if-missing`, and `--eof` flags to match your workflow while upcoming escape-decoding profiles "
-            "keep the ergonomics tuneable for future releases."
+            "`--create-if-missing`, `--escape-profile`, and `--eof` flags to match your workflow while plugins can "
+            "introduce additional decoding policies on demand."
         ),
     )
 

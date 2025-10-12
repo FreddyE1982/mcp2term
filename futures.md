@@ -47,7 +47,7 @@
 
 ## Inline escape decoding profiles
 - **Purpose:** Allow operators to customise how inline `filetool` content is normalised when it contains escape sequences (for example, turning decoding off entirely or enabling additional escape rules for binary payloads).
-- **Usage:** Extend the command parser with configurable profiles that can be selected via command-line flags or plugin policies. Profiles should specify which escape sequences are recognised and whether decoding is conditional on the absence of literal newlines, ensuring administrators can strike the right balance between ergonomics and exactness for their workflows.
+- **Usage:** Expose a plugin registration API so profiles can be installed at runtime (for example from MCP plugins) and forwarded to the client during handshake. Profiles should support validation hooks, remote capability negotiation, and documentation discovery so operators always understand which transformations are active before issuing edits.
 
 ## File operation conflict detection
 - **Purpose:** Detect and prevent conflicting edits when multiple clients edit the same file concurrently through the MCP tools.

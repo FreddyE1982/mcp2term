@@ -508,6 +508,69 @@ def test_manage_file_command_executes_remote_operations(
                 assert statuses and statuses[-1] == 0
                 assert not errors
                 assert any("inline-escape" in line for line in outputs)
+
+                literal_name = f"mcp-literal-{uuid.uuid4().hex}.txt"
+                literal_path = f"{target_dir}/{literal_name}"
+
+                decoded_payload = "decoded\\ncontent\\n"
+                outputs.clear()
+                errors.clear()
+                write_status = processor.execute(
+                    " ".join(
+                        [
+                            "filetool",
+                            "write",
+                            literal_path,
+                            "--content",
+                            shlex.quote(decoded_payload),
+                            "--create-parents",
+                        ]
+                    )
+                )
+                assert write_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+
+                outputs.clear()
+                errors.clear()
+                print_decoded_status = processor.execute(
+                    f"filetool print {literal_path}"
+                )
+                assert print_decoded_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("| decoded" in line for line in outputs)
+                assert any("| content" in line for line in outputs)
+
+                literal_payload = "literal\\nvalue"
+                outputs.clear()
+                errors.clear()
+                append_literal_status = processor.execute(
+                    " ".join(
+                        [
+                            "filetool",
+                            "append",
+                            literal_path,
+                            "--content",
+                            shlex.quote(literal_payload),
+                            "--escape-profile",
+                            "none",
+                        ]
+                    )
+                )
+                assert append_literal_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+
+                outputs.clear()
+                errors.clear()
+                print_literal_status = processor.execute(
+                    f"filetool print {literal_path}"
+                )
+                assert print_literal_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("literal\\nvalue" in line for line in outputs)
             finally:
                 os.unlink(patch_path)
         finally:

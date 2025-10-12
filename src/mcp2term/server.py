@@ -1016,6 +1016,7 @@ def create_server(
         create_parents: bool = False,
         overwrite: bool = False,
         create_if_missing: bool = True,
+        escape_profile: str = "auto",
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         state = ctx.request_context.lifespan_context
@@ -1030,6 +1031,7 @@ def create_server(
             "overwrite": overwrite,
             "create_if_missing": create_if_missing,
             "resolved_path": str(resolved_path),
+            "escape_profile": escape_profile,
         }
         if content is not None:
             request_arguments["content"] = content
@@ -1048,6 +1050,7 @@ def create_server(
                 changed=False,
                 encoding=encoding,
                 message=message,
+                escape_profile=escape_profile,
             )
 
         async def _notify_plugins(
@@ -1074,6 +1077,7 @@ def create_server(
                         overwrite=overwrite,
                         create_parents=create_parents,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "write":
                     result = editor.write_file(
@@ -1081,6 +1085,7 @@ def create_server(
                         text=content or "",
                         create_parents=create_parents,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "append":
                     if content is None:
@@ -1090,6 +1095,7 @@ def create_server(
                         text=content,
                         encoding=encoding,
                         create_if_missing=create_if_missing,
+                        escape_profile=escape_profile,
                     )
                 case "insert":
                     if line is None:
@@ -1101,6 +1107,7 @@ def create_server(
                         line=line,
                         text=content,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "replace":
                     if start_line is None:
@@ -1112,6 +1119,7 @@ def create_server(
                         end_line=effective_end,
                         text=content or "",
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "delete":
                     if start_line is None:
@@ -1122,6 +1130,7 @@ def create_server(
                         start_line=start_line,
                         end_line=effective_end,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "print":
                     result = editor.read_lines(
@@ -1129,6 +1138,7 @@ def create_server(
                         start_line=start_line,
                         end_line=end_line,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "locate":
                     if content is None:
@@ -1137,6 +1147,7 @@ def create_server(
                         path,
                         text=content,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case "patch":
                     if content is None:
@@ -1145,6 +1156,7 @@ def create_server(
                         path,
                         patch_text=content,
                         encoding=encoding,
+                        escape_profile=escape_profile,
                     )
                 case _:
                     raise FileOperationError(f"Unsupported file operation: {operation}")

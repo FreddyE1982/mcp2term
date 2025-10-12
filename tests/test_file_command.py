@@ -29,6 +29,7 @@ def test_parse_manage_file_inline_content(tmp_path: Path, use_real_dependencies:
     assert command.content == "hello world"
     assert command.create_parents is True
     assert command.encoding == "utf-8"
+    assert command.escape_profile == "auto"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -41,6 +42,7 @@ def test_parse_manage_file_from_stdin(tmp_path: Path, use_real_dependencies: boo
     assert command.operation == "write"
     assert command.content == "line-one\nline-two\n"
     assert command.encoding == "utf-8"
+    assert command.escape_profile == "auto"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -59,6 +61,7 @@ def test_parse_manage_file_from_file(tmp_path: Path, use_real_dependencies: bool
     assert command.operation == "append"
     assert command.content == "payload"
     assert command.create_if_missing is False
+    assert command.escape_profile == "auto"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -78,6 +81,7 @@ def test_parse_manage_file_patch_from_file(tmp_path: Path, use_real_dependencies
     )
     assert command.operation == "patch"
     assert "@@ -1 +1 @@" in (command.content or "")
+    assert command.escape_profile == "auto"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -135,6 +139,7 @@ def test_parse_manage_file_decodes_inline_patch_escape_sequences(
     assert command.content is not None
     assert command.content.splitlines()[0] == f"--- a/sample.txt"
     assert command.content.splitlines()[-1] == "+new"
+    assert command.escape_profile == "auto"
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -161,3 +166,40 @@ def test_parse_manage_file_preserves_backslash_leading_lines(
     )
     assert command.content is not None
     assert "\\ No newline at end of file" in command.content
+    assert command.escape_profile == "auto"
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_escape_profile_none_disables_decoding(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    inline_patch = "line-one\\nline-two"
+    command = parse_manage_file_command(
+        [
+            "append",
+            "sample.txt",
+            "--content",
+            inline_patch,
+            "--escape-profile",
+            "none",
+        ]
+    )
+    assert command.escape_profile == "none"
+    assert command.content == inline_patch
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_rejects_unknown_escape_profile(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "append",
+                "sample.txt",
+                "--content",
+                "text",
+                "--escape-profile",
+                "unknown-profile",
+            ]
+        )
