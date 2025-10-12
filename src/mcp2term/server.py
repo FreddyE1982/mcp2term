@@ -57,6 +57,12 @@ class ApplicationState:
     chat_bridge: "UserChatBridge"
 
 
+# Characters frequently emitted by spinner/progress indicators that should not
+# be preserved when console echoing is paused. Filtering them avoids replaying
+# transient animation frames once streaming resumes.
+_SPINNER_FRAGMENTS = {"-", "|", "/", "\\", "\r"}
+
+
 class ConsoleStreamProxy(io.TextIOBase):
     """Thread-safe stream wrapper buffering output while console echoing is paused."""
 
@@ -156,6 +162,10 @@ class ConsoleStreamProxy(io.TextIOBase):
         """Write multiple ``lines`` while respecting the pause state."""
 
         for line in lines:
+            if not isinstance(line, str):
+                line = str(line)
+            if self._paused and line in _SPINNER_FRAGMENTS:
+                continue
             self.write(line)
 
     def set_paused(self, paused: bool) -> None:
