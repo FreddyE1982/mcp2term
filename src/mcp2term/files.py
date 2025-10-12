@@ -32,6 +32,7 @@ class FileOperationResult:
     content: str | None = None
     lines: tuple[FileLine, ...] = tuple()
     line_numbers: tuple[int, ...] = tuple()
+    escape_profile: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Serialize the result into a JSON compatible mapping."""
@@ -53,6 +54,8 @@ class FileOperationResult:
             ]
         if self.line_numbers:
             payload["line_numbers"] = list(self.line_numbers)
+        if self.escape_profile is not None:
+            payload["escape_profile"] = self.escape_profile
         return payload
 
 
@@ -108,6 +111,7 @@ class FileEditor:
         overwrite: bool,
         create_parents: bool,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         target = self.resolve_path(raw_path)
         existed = target.exists()
@@ -125,6 +129,7 @@ class FileEditor:
             encoding=encoding,
             message=f"{verb} {target}",
             content=content,
+            escape_profile=escape_profile,
         )
 
     def write_file(
@@ -134,6 +139,7 @@ class FileEditor:
         text: str,
         create_parents: bool,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         target = self.resolve_path(raw_path)
         self._ensure_parent(target, create_parents=create_parents)
@@ -146,6 +152,7 @@ class FileEditor:
             encoding=encoding,
             message=f"Wrote {target}",
             content=text,
+            escape_profile=escape_profile,
         )
 
     def append_text(
@@ -155,6 +162,7 @@ class FileEditor:
         text: str,
         encoding: str,
         create_if_missing: bool,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         target = self.resolve_path(raw_path)
         if not target.exists():
@@ -174,6 +182,7 @@ class FileEditor:
             encoding=encoding,
             message=f"Appended to {target}",
             content=new_text,
+            escape_profile=escape_profile,
         )
 
     def apply_patch(
@@ -182,6 +191,7 @@ class FileEditor:
         *,
         patch_text: str,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         """Apply a unified diff patch to an existing file."""
 
@@ -234,6 +244,7 @@ class FileEditor:
             encoding=encoding,
             message=message,
             content=updated_text,
+            escape_profile=escape_profile,
         )
 
     def insert_lines(
@@ -243,6 +254,7 @@ class FileEditor:
         line: int,
         text: str,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         lines, trailing_newline = self._load_lines(raw_path, encoding=encoding)
         index = self._validate_insertion_index(line, len(lines))
@@ -262,6 +274,7 @@ class FileEditor:
             encoding=encoding,
             message=f"Inserted {len(insert_lines)} line(s) at {line}",
             content="\n".join(lines),
+            escape_profile=escape_profile,
         )
 
     def replace_range(
@@ -272,6 +285,7 @@ class FileEditor:
         end_line: int,
         text: str,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         lines, trailing_newline = self._load_lines(raw_path, encoding=encoding)
         start_index, end_index, actual_end = self._validate_range(
@@ -293,6 +307,7 @@ class FileEditor:
             encoding=encoding,
             message=f"Replaced lines {start_line}-{actual_end}",
             content="\n".join(lines),
+            escape_profile=escape_profile,
         )
 
     def delete_range(
@@ -302,6 +317,7 @@ class FileEditor:
         start_line: int,
         end_line: int,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         lines, trailing_newline = self._load_lines(raw_path, encoding=encoding)
         start_index, end_index, actual_end = self._validate_range(
@@ -322,6 +338,7 @@ class FileEditor:
             encoding=encoding,
             message=f"Deleted lines {start_line}-{actual_end}",
             content="\n".join(lines),
+            escape_profile=escape_profile,
         )
 
     def read_lines(
@@ -331,6 +348,7 @@ class FileEditor:
         start_line: int | None,
         end_line: int | None,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         lines, _ = self._load_lines(raw_path, encoding=encoding)
         total_lines = len(lines)
@@ -364,6 +382,7 @@ class FileEditor:
             message=message,
             content=content,
             lines=numbered,
+            escape_profile=escape_profile,
         )
 
     def find_line_numbers(
@@ -372,6 +391,7 @@ class FileEditor:
         *,
         text: str,
         encoding: str,
+        escape_profile: str | None = None,
     ) -> FileOperationResult:
         if not text:
             raise FileOperationError("Search text must not be empty")
@@ -388,6 +408,7 @@ class FileEditor:
             encoding=encoding,
             message=message,
             line_numbers=tuple(matches),
+            escape_profile=escape_profile,
         )
 
     def _ensure_parent(self, target: Path, *, create_parents: bool) -> None:

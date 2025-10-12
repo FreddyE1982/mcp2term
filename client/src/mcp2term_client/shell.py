@@ -189,6 +189,7 @@ class RemoteCommandProcessor:
                 create_parents=command.create_parents,
                 overwrite=command.overwrite,
                 create_if_missing=command.create_if_missing,
+                escape_profile=command.escape_profile,
             )
         except Exception as exc:
             self.error_writer(f"filetool: {exc}")

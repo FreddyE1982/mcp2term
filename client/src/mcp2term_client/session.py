@@ -596,6 +596,7 @@ class RemoteMcpSession:
         create_parents: bool = False,
         overwrite: bool = False,
         create_if_missing: bool = True,
+        escape_profile: str = "auto",
     ) -> FileOperationResponse:
         try:
             response = self._submit_request(
@@ -610,6 +611,7 @@ class RemoteMcpSession:
                 create_parents=create_parents,
                 overwrite=overwrite,
                 create_if_missing=create_if_missing,
+                escape_profile=escape_profile,
             )
         except Exception as exc:
             self._emit_warning(
