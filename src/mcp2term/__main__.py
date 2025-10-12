@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 from .config import ServerConfig
 from .plugin import GlobalPluginManager
@@ -57,6 +58,7 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
     config = ServerConfig.from_env()
+    config.export_launch_directory_to_pythonpath(os.environ)
     if args.disable_ngrok:
         config.ngrok.enabled = False
     server = create_server(config=config)
