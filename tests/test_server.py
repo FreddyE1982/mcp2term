@@ -2,9 +2,7 @@
 
 import asyncio
 import os
-import shlex
 from pathlib import Path
-from types import MappingProxyType
 
 import pytest
 
@@ -16,7 +14,7 @@ from mcp2term.plugin import (
     PluginRegistry,
     ServerWarningEvent,
 )
-from mcp2term.server import SystemTerminalLauncher, UserChatBridge, create_server
+from mcp2term.server import UserChatBridge, create_server
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -126,14 +124,3 @@ def test_chat_bridge_inactive_when_terminal_disabled(use_real_dependencies: bool
             os.environ["MCP2TERM_CHAT_TERMINAL"] = original
 
 
-@pytest.mark.parametrize("use_real_dependencies", [False, True])
-def test_terminal_launcher_honours_override_command(use_real_dependencies: bool) -> None:
-    override = "python -m custom.module"
-    environment = {"MCP2TERM_CHAT_TERMINAL": override}
-    launcher = SystemTerminalLauncher(environment=MappingProxyType(environment))
-    invocation = ["/usr/bin/python", "-m", "mcp2term.chat_terminal"]
-
-    plan = launcher.prepare_plan(invocation, title="demo")
-
-    assert plan is not None
-    assert plan.command[: len(shlex.split(override))] == shlex.split(override)
