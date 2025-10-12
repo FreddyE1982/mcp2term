@@ -38,6 +38,8 @@ The project targets Python 3.12 or newer.
 | `MCP2TERM_PLUGINS` | Comma-separated dotted module paths to load as plugins. | *(none)* |
 | `MCP2TERM_COMMAND_TIMEOUT` | Default timeout in seconds for commands. | unlimited |
 | `MCP2TERM_STREAM_CHUNK_SIZE` | Bytes read from stdout/stderr per chunk while streaming. | `65536` |
+| `MCP2TERM_LONG_COMMAND_NOTICE_DELAY` | Seconds to wait before emitting long-running command notices. | `2.0` |
+| `MCP2TERM_LONG_COMMAND_NOTICE_INTERVAL` | Interval in seconds between long-running command notices. | `5.0` |
 | `MCP2TERM_CONSOLE_ECHO` | Mirror commands and output to the server console (`true`/`false`). | `true` |
 | `MCP2TERM_CHAT_TERMINAL` | Set to `disabled` to suppress the console-integrated messaging bridge. Legacy values are accepted but ignored. | *(unused)* |
 
