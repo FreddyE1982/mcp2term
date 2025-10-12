@@ -56,3 +56,7 @@
 ## Client onboarding banner plugins
 - **Purpose:** Allow deployments to tailor the introductory message shown after connecting, injecting organisation-specific guidance, compliance prompts, or links to documentation without editing the core client.
 - **Usage:** Extend the intro banner provider registry with plugin-discovered providers that can append new sections or rewrite existing ones. Plugins could surface mandatory security reminders, company hotkeys, or dynamic status indicators fetched from monitoring APIs while preserving the default capability overview for new operators.
+
+## Persistent user chat transcripts
+- **Purpose:** Preserve the PyQt5 chat window history across server restarts so operational directives sent from the supervising user remain auditable.
+- **Usage:** Extend the new `UserChatBridge` with pluggable transcript writers that stream each emitted message into structured storage (for example, newline-delimited JSON). Provide rotation policies, remote sinks (such as syslog or HTTP POST targets), and tooling to replay transcripts into the MCP logging bus when a client reconnects mid-session.
