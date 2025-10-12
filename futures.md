@@ -106,3 +106,14 @@
   Provide CLI switches and environment variables so deployments can describe the
   desired ordering while keeping the launch-directory guarantee available as the
   default behaviour.
+
+## Progress notice customisation policies
+- **Purpose:** Allow operators and plugin authors to tailor the long-running command
+  notice content, include structured metadata such as elapsed durations, and localise
+  the phrasing for diverse deployment environments without patching the executor.
+- **Usage:** Introduce a configuration block and plugin hook that accepts a progress
+  notice policy object. The policy should define the rendered message template, optional
+  metadata attachments for MCP log consumers, and thresholds for when additional
+  diagnostics (such as process tree snapshots) should be emitted. Provide documentation
+  so administrators understand how to register policies and expose sample templates for
+  common operations, including localisation examples.

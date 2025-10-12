@@ -221,6 +221,48 @@ def test_shell_executor_emits_progress_notices_for_long_commands(use_real_depend
     result = asyncio.run(executor.run(command, ctx=context))
 
     assert result.return_code == 0
-    matching_messages = [message for message in context.info_messages if message == "COMANND STILL PROCESSING. PLEASE WAIT"]
+    matching_messages = [message for message in context.info_messages if message == "COMMAND STILL PROCESSING. PLEASE WAIT"]
     assert len(matching_messages) >= 2, "Expected at least two long-running notices to be emitted"
     assert not context.error_messages
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_long_running_notices_stop_after_completion(use_real_dependencies: bool) -> None:
+    config = ServerConfig(
+        long_command_notice_delay=0.1,
+        long_command_notice_interval=0.1,
+    )
+    manager = PluginManager()
+    manager.refresh_exports()
+    executor = ShellCommandExecutor(config, manager)
+    context = RecordingContext()
+
+    async def run_and_interrupt() -> CommandResult:
+        command_id = "long-notice-stop"
+        task = asyncio.create_task(
+            executor.run(
+                "python -c 'import time; time.sleep(10)'",
+                ctx=context,
+                command_id=command_id,
+            )
+        )
+
+        # Wait for the first progress notice to be emitted so we know monitoring started.
+        for _ in range(50):
+            if any(message == "COMMAND STILL PROCESSING. PLEASE WAIT" for message in context.info_messages):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("Expected a long-running notice before interruption")
+
+        delivered = await executor.interrupt(command_id)
+        assert delivered, "Expected interrupt signal to be delivered"
+
+        result = await task
+        notice_count_after_completion = len(context.info_messages)
+        await asyncio.sleep(0.3)
+        assert len(context.info_messages) == notice_count_after_completion
+        return result
+
+    result = asyncio.run(run_and_interrupt())
+    assert result.return_code != 0
