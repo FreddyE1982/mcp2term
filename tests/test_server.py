@@ -1,8 +1,10 @@
 """Tests for the MCP server factory and plugin exposure."""
 
 import asyncio
-import multiprocessing
+import os
+import shlex
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -14,12 +16,7 @@ from mcp2term.plugin import (
     PluginRegistry,
     ServerWarningEvent,
 )
-from mcp2term.server import (
-    ChatBridgeEnvelope,
-    UserChatBridge,
-    _ENVELOPE_KIND_STOP,
-    create_server,
-)
+from mcp2term.server import SystemTerminalLauncher, UserChatBridge, create_server
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -111,33 +108,32 @@ def test_plugin_manager_emits_file_operation_event(tmp_path: Path, use_real_depe
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-def test_chat_bridge_requires_queue_initialisation(use_real_dependencies: bool) -> None:
+def test_chat_bridge_inactive_when_terminal_disabled(use_real_dependencies: bool) -> None:
     manager = PluginManager()
-    bridge = UserChatBridge(plugin_manager=manager, console_echo=False)
-    bridge._qt_available = True
+    original = os.environ.get("MCP2TERM_CHAT_TERMINAL")
+    os.environ["MCP2TERM_CHAT_TERMINAL"] = "disabled"
 
-    with pytest.raises(RuntimeError):
-        bridge._start_gui_process()
+    async def _exercise_bridge() -> None:
+        async with UserChatBridge(plugin_manager=manager, console_echo=False) as bridge:
+            assert not bridge.is_active
+
+    try:
+        asyncio.run(_exercise_bridge())
+    finally:
+        if original is None:
+            os.environ.pop("MCP2TERM_CHAT_TERMINAL", None)
+        else:
+            os.environ["MCP2TERM_CHAT_TERMINAL"] = original
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
-def test_chat_bridge_message_pump_handles_stop_signal(use_real_dependencies: bool) -> None:
-    manager = PluginManager()
-    bridge = UserChatBridge(plugin_manager=manager, console_echo=False)
-    bridge._message_queue = multiprocessing.Queue()
+def test_terminal_launcher_honours_override_command(use_real_dependencies: bool) -> None:
+    override = "python -m custom.module"
+    environment = {"MCP2TERM_CHAT_TERMINAL": override}
+    launcher = SystemTerminalLauncher(environment=MappingProxyType(environment))
+    invocation = ["/usr/bin/python", "-m", "mcp2term.chat_terminal"]
 
-    async def _exercise_pump() -> None:
-        task = asyncio.create_task(bridge._message_pump())
-        await asyncio.sleep(0)
-        assert bridge._message_queue is not None
-        bridge._message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
-        await task
+    plan = launcher.prepare_plan(invocation, title="demo")
 
-    asyncio.run(_exercise_pump())
-
-    assert bridge._pump_cancel_scope is None
-
-    assert bridge._message_queue is not None
-    bridge._message_queue.close()
-    bridge._message_queue.join_thread()
-    bridge._message_queue = None
+    assert plan is not None
+    assert plan.command[: len(shlex.split(override))] == shlex.split(override)
