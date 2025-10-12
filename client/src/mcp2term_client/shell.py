@@ -183,6 +183,7 @@ class RemoteCommandProcessor:
                 command.path,
                 operation=command.operation,
                 content=command.content,
+                pattern=command.pattern,
                 line=command.line,
                 start_line=command.start_line,
                 end_line=command.end_line,
@@ -192,6 +193,9 @@ class RemoteCommandProcessor:
                 create_if_missing=command.create_if_missing,
                 escape_profile=command.escape_profile,
                 follow_symlinks=command.follow_symlinks,
+                use_regex=command.use_regex,
+                ignore_case=command.ignore_case,
+                max_replacements=command.max_replacements,
             )
         except Exception as exc:
             self.error_writer(f"filetool: {exc}")

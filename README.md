@@ -79,7 +79,7 @@ Use `send_stdin` to stream additional input to an interactive command. The tool 
 that closes the stdin pipe once all required data has been delivered. The response reports whether the input was accepted so
 clients can retry or surface helpful diagnostics.
 
-`manage_file(path: str, *, operation: str, content: Optional[str] = None, line: Optional[int] = None, start_line: Optional[int] = None, end_line: Optional[int] = None, encoding: str = "utf-8", create_parents: bool = False, overwrite: bool = False, create_if_missing: bool = True, escape_profile: str = "auto")`
+`manage_file(path: str, *, operation: str, content: Optional[str] = None, pattern: Optional[str] = None, line: Optional[int] = None, start_line: Optional[int] = None, end_line: Optional[int] = None, encoding: str = "utf-8", create_parents: bool = False, overwrite: bool = False, create_if_missing: bool = True, escape_profile: str = "auto", follow_symlinks: bool = True, use_regex: bool = False, ignore_case: bool = False, max_replacements: Optional[int] = None)`
 
 `manage_file` powers the `filetool` client command and exposes a broad suite of line-aware editing operations. The `escape_profile`
 parameter controls how inline `--content` payloads are normalised before they reach the server:
@@ -87,6 +87,11 @@ parameter controls how inline `--content` payloads are normalised before they re
 - `auto` (default) mirrors the original behaviour and expands `\n`, `\t`, `\r`, and `\0` sequences when the payload would otherwise be a single line.
 - `none` disables all inline decoding so payloads arrive exactly as typed, perfect for binary-friendly workflows or when backslashes carry semantic meaning.
 - Additional profiles can be registered by extensions to enforce organisation-specific escaping rules. The selected profile is forwarded to plugins via the `FileOperationEvent` payload so observability tooling can respond appropriately.
+
+Recent updates add top-of-file editing and pattern-driven substitutions to the toolbox:
+
+- `prepend` injects content at the start of a file and respects `--create-if-missing` so you can bootstrap brand new files with headers in a single command.
+- `substitute --pattern PATTERN --content TEXT` performs literal or regex-based replacements while streaming structured metadata (matched pattern, replacement counts, and flags such as `--ignore-case` or `--max-replacements`) back to the caller.
 
 Example usages:
 

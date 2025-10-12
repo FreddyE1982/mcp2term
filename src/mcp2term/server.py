@@ -1009,6 +1009,7 @@ def create_server(
         *,
         operation: str,
         content: str | None = None,
+        pattern: str | None = None,
         line: int | None = None,
         start_line: int | None = None,
         end_line: int | None = None,
@@ -1018,6 +1019,9 @@ def create_server(
         create_if_missing: bool = True,
         escape_profile: str = "auto",
         follow_symlinks: bool = True,
+        use_regex: bool = False,
+        ignore_case: bool = False,
+        max_replacements: int | None = None,
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         state = ctx.request_context.lifespan_context
@@ -1034,15 +1038,21 @@ def create_server(
             "resolved_path": str(resolved_path),
             "escape_profile": escape_profile,
             "follow_symlinks": follow_symlinks,
+            "use_regex": use_regex,
+            "ignore_case": ignore_case,
         }
         if content is not None:
             request_arguments["content"] = content
+        if pattern is not None:
+            request_arguments["pattern"] = pattern
         if line is not None:
             request_arguments["line"] = line
         if start_line is not None:
             request_arguments["start_line"] = start_line
         if end_line is not None:
             request_arguments["end_line"] = end_line
+        if max_replacements is not None:
+            request_arguments["max_replacements"] = max_replacements
 
         def _failure(message: str) -> FileOperationResult:
             return FileOperationResult(
@@ -1093,6 +1103,16 @@ def create_server(
                     if content is None:
                         raise FileOperationError("Append operation requires content text")
                     result = editor.append_text(
+                        path,
+                        text=content,
+                        encoding=encoding,
+                        create_if_missing=create_if_missing,
+                        escape_profile=escape_profile,
+                    )
+                case "prepend":
+                    if content is None:
+                        raise FileOperationError("Prepend operation requires content text")
+                    result = editor.prepend_text(
                         path,
                         text=content,
                         encoding=encoding,
@@ -1165,6 +1185,21 @@ def create_server(
                         path,
                         encoding=encoding,
                         follow_symlinks=follow_symlinks,
+                        escape_profile=escape_profile,
+                    )
+                case "substitute":
+                    if pattern is None:
+                        raise FileOperationError("Substitute operation requires a pattern")
+                    if content is None:
+                        raise FileOperationError("Substitute operation requires replacement text")
+                    result = editor.substitute_text(
+                        path,
+                        pattern=pattern,
+                        replacement=content,
+                        encoding=encoding,
+                        use_regex=use_regex,
+                        ignore_case=ignore_case,
+                        max_replacements=max_replacements,
                         escape_profile=escape_profile,
                     )
                 case _:

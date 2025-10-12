@@ -43,6 +43,10 @@ def test_parse_manage_file_from_stdin(tmp_path: Path, use_real_dependencies: boo
     assert command.content == "line-one\nline-two\n"
     assert command.encoding == "utf-8"
     assert command.escape_profile == "auto"
+    assert command.pattern is None
+    assert command.use_regex is False
+    assert command.ignore_case is False
+    assert command.max_replacements is None
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -186,6 +190,7 @@ def test_parse_manage_file_escape_profile_none_disables_decoding(
     )
     assert command.escape_profile == "none"
     assert command.content == inline_patch
+    assert command.pattern is None
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -201,5 +206,119 @@ def test_parse_manage_file_rejects_unknown_escape_profile(
                 "text",
                 "--escape-profile",
                 "unknown-profile",
+            ]
+        )
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_prepend_requires_content(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(["prepend", "story.txt"])
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_substitute_literal(tmp_path: Path, use_real_dependencies: bool) -> None:
+    command = parse_manage_file_command(
+        [
+            "substitute",
+            "story.txt",
+            "--pattern",
+            "alpha",
+            "--content",
+            "beta",
+        ]
+    )
+    assert command.operation == "substitute"
+    assert command.pattern == "alpha"
+    assert command.content == "beta"
+    assert command.use_regex is False
+    assert command.ignore_case is False
+    assert command.max_replacements is None
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_substitute_from_file(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    pattern_path = tmp_path / "pattern.txt"
+    pattern_path.write_text("needle", encoding="utf-8")
+    command = parse_manage_file_command(
+        [
+            "substitute",
+            "story.txt",
+            "--pattern-from-file",
+            str(pattern_path),
+            "--content",
+            "replacement",
+            "--ignore-case",
+            "--max-replacements",
+            "2",
+        ]
+    )
+    assert command.pattern == "needle"
+    assert command.ignore_case is True
+    assert command.max_replacements == 2
+    assert command.use_regex is False
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_substitute_regex(tmp_path: Path, use_real_dependencies: bool) -> None:
+    command = parse_manage_file_command(
+        [
+            "substitute",
+            "story.txt",
+            "--pattern",
+            "(?P<word>alpha)",
+            "--content",
+            "{word}",
+            "--regex",
+        ]
+    )
+    assert command.use_regex is True
+    assert command.pattern == "(?P<word>alpha)"
+    assert command.content == "{word}"
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_substitute_rejects_invalid_usage(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "write",
+                "story.txt",
+                "--pattern",
+                "needle",
+            ]
+        )
+
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "replace",
+                "story.txt",
+                "--start-line",
+                "1",
+                "--content",
+                "alpha",
+                "--max-replacements",
+                "3",
+            ]
+        )
+
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "substitute",
+                "story.txt",
+                "--pattern",
+                "needle",
+                "--content",
+                "replacement",
+                "--max-replacements",
+                "0",
             ]
         )

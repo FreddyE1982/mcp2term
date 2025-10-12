@@ -596,6 +596,7 @@ class RemoteMcpSession:
         *,
         operation: str,
         content: str | None = None,
+        pattern: str | None = None,
         line: int | None = None,
         start_line: int | None = None,
         end_line: int | None = None,
@@ -605,6 +606,9 @@ class RemoteMcpSession:
         create_if_missing: bool = True,
         escape_profile: str = "auto",
         follow_symlinks: bool = True,
+        use_regex: bool = False,
+        ignore_case: bool = False,
+        max_replacements: int | None = None,
     ) -> FileOperationResponse:
         try:
             response = self._submit_request(
@@ -612,6 +616,7 @@ class RemoteMcpSession:
                 path=path,
                 operation=operation,
                 content=content,
+                pattern=pattern,
                 line=line,
                 start_line=start_line,
                 end_line=end_line,
@@ -621,6 +626,9 @@ class RemoteMcpSession:
                 create_if_missing=create_if_missing,
                 escape_profile=escape_profile,
                 follow_symlinks=follow_symlinks,
+                use_regex=use_regex,
+                ignore_case=ignore_case,
+                max_replacements=max_replacements,
             )
         except Exception as exc:
             self._emit_warning(
@@ -877,6 +885,7 @@ class RemoteMcpSession:
                             request.payload["path"],
                             request.payload["operation"],
                             request.payload.get("content"),
+                            request.payload.get("pattern"),
                             request.payload.get("line"),
                             request.payload.get("start_line"),
                             request.payload.get("end_line"),
@@ -886,6 +895,9 @@ class RemoteMcpSession:
                             bool(request.payload.get("create_if_missing", True)),
                             str(request.payload.get("escape_profile", "auto")),
                             bool(request.payload.get("follow_symlinks", True)),
+                            bool(request.payload.get("use_regex", False)),
+                            bool(request.payload.get("ignore_case", False)),
+                            request.payload.get("max_replacements"),
                         )
                         request.future.set_result(result)
                         self._emit_warnings(result.warnings)
@@ -1014,6 +1026,7 @@ class RemoteMcpSession:
         path: str,
         operation: str,
         content: str | None,
+        pattern: str | None,
         line: int | None,
         start_line: int | None,
         end_line: int | None,
@@ -1023,6 +1036,9 @@ class RemoteMcpSession:
         create_if_missing: bool,
         escape_profile: str,
         follow_symlinks: bool,
+        use_regex: bool,
+        ignore_case: bool,
+        max_replacements: int | None,
     ) -> FileOperationResponse:
         if self._session is None:
             raise RuntimeError("RemoteMcpSession used before start()")
@@ -1035,15 +1051,21 @@ class RemoteMcpSession:
             "create_if_missing": create_if_missing,
             "escape_profile": escape_profile,
             "follow_symlinks": follow_symlinks,
+            "use_regex": use_regex,
+            "ignore_case": ignore_case,
         }
         if content is not None:
             arguments["content"] = content
+        if pattern is not None:
+            arguments["pattern"] = pattern
         if line is not None:
             arguments["line"] = line
         if start_line is not None:
             arguments["start_line"] = start_line
         if end_line is not None:
             arguments["end_line"] = end_line
+        if max_replacements is not None:
+            arguments["max_replacements"] = max_replacements
         result = await self._session.call_tool("manage_file", arguments)
         return FileOperationResponse.from_call_tool_result(result)
 
