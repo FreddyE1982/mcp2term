@@ -30,9 +30,11 @@ _ALLOWED_OPERATIONS = (
     "insert",
     "locate",
     "patch",
+    "prepend",
     "print",
     "stat",
     "replace",
+    "substitute",
     "write",
 )
 
@@ -41,7 +43,9 @@ _INLINE_CONTENT_OPERATIONS = frozenset({
     "create",
     "insert",
     "patch",
+    "prepend",
     "replace",
+    "substitute",
     "write",
 })
 
@@ -198,6 +202,7 @@ class ManageFileCommand:
     operation: str
     path: str
     content: str | None
+    pattern: str | None
     line: int | None
     start_line: int | None
     end_line: int | None
@@ -208,6 +213,9 @@ class ManageFileCommand:
     escape_profile: str
     follow_symlinks: bool
     output_format: str
+    use_regex: bool
+    ignore_case: bool
+    max_replacements: int | None
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -225,12 +233,14 @@ def _create_parser() -> _ArgumentParser:
   create   Create or overwrite a file with optional content.
   write    Replace the entire file contents.
   append   Append text to the end of a file, optionally creating it.
+  prepend  Insert text at the beginning of a file while honouring creation flags.
   insert   Insert new lines before the specified line number.
   replace  Replace a range of lines with new content.
   delete   Remove a range of lines entirely.
   print    Display the requested line range with numbering.
   locate   Report line numbers containing the provided search text.
   patch    Apply a unified diff patch to an existing file.
+  substitute  Replace occurrences of a pattern with new text using literal or regex matching.
   stat     Display filesystem metadata for the target path.
 """
     parser = _ArgumentParser(
@@ -272,6 +282,40 @@ def _create_parser() -> _ArgumentParser:
         help=(
             "Selects the inline escape decoding strategy. Available profiles: "
             f"{available_profiles or 'auto, none'}."
+        ),
+    )
+    parser.add_argument(
+        "--pattern",
+        help=(
+            "Pattern text consumed by the substitute operation. Patterns default to literal matching "
+            "but can be interpreted as regular expressions via --regex."
+        ),
+    )
+    parser.add_argument(
+        "--pattern-from-file",
+        dest="pattern_file",
+        help="Load the substitute pattern from a local file using the specified encoding.",
+    )
+    parser.add_argument(
+        "--regex",
+        dest="use_regex",
+        action="store_true",
+        default=False,
+        help="Interpret the substitute pattern as a Python regular expression.",
+    )
+    parser.add_argument(
+        "--ignore-case",
+        dest="ignore_case",
+        action="store_true",
+        default=False,
+        help="Perform case-insensitive matching for the substitute operation.",
+    )
+    parser.add_argument(
+        "--max-replacements",
+        dest="max_replacements",
+        type=int,
+        help=(
+            "Limit the number of replacements performed by substitute. Omit the option to replace all matches."
         ),
     )
     parser.add_argument(
@@ -391,13 +435,28 @@ def parse_manage_file_command(
         operation=operation,
         escape_profile=escape_profile,
     )
+    pattern = _resolve_pattern(
+        namespace,
+        encoding=namespace.encoding,
+        operation=operation,
+    )
     path = namespace.path
     encoding = namespace.encoding
     line = namespace.line
     start_line = namespace.start_line
     end_line = namespace.end_line
 
-    _validate_arguments(operation, line, start_line, end_line, content)
+    _validate_arguments(
+        operation,
+        line,
+        start_line,
+        end_line,
+        content,
+        pattern,
+        bool(namespace.use_regex),
+        bool(namespace.ignore_case),
+        namespace.max_replacements,
+    )
 
     if operation == "stat":
         content = None
@@ -406,6 +465,7 @@ def parse_manage_file_command(
         operation=operation,
         path=path,
         content=content,
+        pattern=pattern,
         line=line,
         start_line=start_line,
         end_line=end_line,
@@ -416,6 +476,9 @@ def parse_manage_file_command(
         escape_profile=escape_profile,
         follow_symlinks=bool(namespace.follow_symlinks),
         output_format=str(namespace.output_format),
+        use_regex=bool(namespace.use_regex),
+        ignore_case=bool(namespace.ignore_case),
+        max_replacements=namespace.max_replacements,
     )
 
 
@@ -464,12 +527,57 @@ def _resolve_content(
         raise FileCommandParseError(f"Failed to read stdin: {exc}") from exc
 
 
+def _resolve_pattern(
+    namespace: argparse.Namespace,
+    *,
+    encoding: str,
+    operation: str,
+) -> str | None:
+    """Resolve the pattern payload used by the substitute operation."""
+
+    sources = [
+        name
+        for name, enabled in {
+            "pattern": namespace.pattern is not None,
+            "pattern_file": namespace.pattern_file is not None,
+        }.items()
+        if enabled
+    ]
+    if operation != "substitute" and sources:
+        raise FileCommandParseError(
+            "--pattern is only valid for the substitute operation",
+            usage=_create_parser().format_usage(),
+        )
+    if len(sources) > 1:
+        raise FileCommandParseError(
+            "Only one of --pattern or --pattern-from-file may be provided.",
+            usage=_create_parser().format_usage(),
+        )
+    if not sources:
+        return None
+
+    if namespace.pattern_file is not None:
+        path = Path(namespace.pattern_file).expanduser()
+        try:
+            return path.read_text(encoding=encoding)
+        except FileNotFoundError as exc:
+            raise FileCommandParseError(f"Pattern file not found: {path}") from exc
+        except OSError as exc:
+            raise FileCommandParseError(f"Failed to read pattern file: {path}: {exc}") from exc
+    assert namespace.pattern is not None
+    return namespace.pattern
+
+
 def _validate_arguments(
     operation: str,
     line: int | None,
     start_line: int | None,
     end_line: int | None,
     content: str | None,
+    pattern: str | None,
+    use_regex: bool,
+    ignore_case: bool,
+    max_replacements: int | None,
 ) -> None:
     """Validate operation-specific requirements."""
 
@@ -506,6 +614,11 @@ def _validate_arguments(
             f"The {operation} operation requires content via --content, --content-from-file, or --stdin.",
         )
 
+    if operation == "prepend" and content is None:
+        raise FileCommandParseError(
+            "The prepend operation requires content via --content, --content-from-file, or --stdin.",
+        )
+
     if operation == "patch" and content is None:
         raise FileCommandParseError(
             "The patch operation requires a unified diff via --content, --content-from-file, or --stdin.",
@@ -514,6 +627,29 @@ def _validate_arguments(
     if operation == "locate":
         if content is None or content.strip() == "":
             raise FileCommandParseError("locate requires non-empty content text")
+
+    if max_replacements is not None:
+        if max_replacements <= 0:
+            raise FileCommandParseError("--max-replacements must be greater than zero")
+        if operation != "substitute":
+            raise FileCommandParseError(
+                "--max-replacements is only valid for the substitute operation",
+            )
+
+    if (use_regex or ignore_case) and operation != "substitute":
+        raise FileCommandParseError(
+            "--regex and --ignore-case are only valid for the substitute operation",
+        )
+
+    if operation == "substitute":
+        if pattern is None:
+            raise FileCommandParseError(
+                "substitute requires a search pattern via --pattern or --pattern-from-file",
+            )
+        if content is None:
+            raise FileCommandParseError(
+                "substitute requires replacement content via --content, --content-from-file, or --stdin.",
+            )
 
     if operation == "replace" and content is None:
         # Empty string is valid and should replace the range with nothing.

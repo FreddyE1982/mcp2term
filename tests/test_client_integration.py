@@ -572,6 +572,94 @@ def test_manage_file_command_executes_remote_operations(
                 assert statuses and statuses[-1] == 0
                 assert not errors
                 assert any("literal\\nvalue" in line for line in outputs)
+
+                prepend_payload = "preamble\n"
+                outputs.clear()
+                errors.clear()
+                prepend_status = processor.execute(
+                    " ".join(
+                        [
+                            "filetool",
+                            "prepend",
+                            literal_path,
+                            "--content",
+                            shlex.quote(prepend_payload),
+                        ]
+                    )
+                )
+                assert prepend_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("Prepended" in line or "Created" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                print_prepended_status = processor.execute(
+                    f"filetool print {literal_path} --start-line 1 --end-line 1"
+                )
+                assert print_prepended_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("preamble" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                substitute_status = processor.execute(
+                    " ".join(
+                        [
+                            "filetool",
+                            "substitute",
+                            literal_path,
+                            "--pattern",
+                            shlex.quote("content"),
+                            "--content",
+                            shlex.quote("CONTENT"),
+                        ]
+                    )
+                )
+                assert substitute_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("Substituted" in line for line in outputs)
+                assert any("pattern" in line for line in outputs)
+                assert any("replacements" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                regex_substitute_status = processor.execute(
+                    " ".join(
+                        [
+                            "filetool",
+                            "substitute",
+                            literal_path,
+                            "--pattern",
+                            shlex.quote(r"^literal"),
+                            "--content",
+                            shlex.quote("LITERAL"),
+                            "--regex",
+                            "--ignore-case",
+                            "--max-replacements",
+                            "1",
+                        ]
+                    )
+                )
+                assert regex_substitute_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("regex" in line for line in outputs)
+                assert any("ignore_case" in line for line in outputs)
+                assert any("max_replacements" in line for line in outputs)
+
+                outputs.clear()
+                errors.clear()
+                final_print_status = processor.execute(
+                    f"filetool print {literal_path}"
+                )
+                assert final_print_status == 0
+                assert statuses and statuses[-1] == 0
+                assert not errors
+                assert any("CONTENT" in line for line in outputs)
+                assert any("LITERAL" in line for line in outputs)
             finally:
                 os.unlink(patch_path)
         finally:

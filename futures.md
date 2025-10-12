@@ -88,3 +88,7 @@
 ## File metadata diffing
 - **Purpose:** Allow operators to compare consecutive `stat` results so that automated workflows can detect drift in permissions, ownership, or size without scraping terminal logs.
 - **Usage:** Persist the most recent metadata snapshot for each inspected path inside the client state store, then extend the `filetool stat` command with an opt-in flag (for example `--diff-previous`) that renders side-by-side changes. The server should expose an efficient metadata checksum to avoid transmitting redundant fields, and plugins could subscribe to metadata change events to trigger alerting or remediation pipelines.
+
+## Substitution preview mode
+- **Purpose:** Allow operators to verify `substitute` results without mutating files, providing confidence before large-scale replacements.
+- **Usage:** Introduce a `--dry-run` flag that reports match counts, diff excerpts, and regex group expansions while leaving the file untouched. The server would reuse the existing substitution engine but skip writes, returning detailed metadata for auditing tools and interactive confirmation prompts.

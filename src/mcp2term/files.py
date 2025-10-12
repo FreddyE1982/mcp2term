@@ -192,6 +192,59 @@ class FileEditor:
             escape_profile=escape_profile,
         )
 
+    def prepend_text(
+        self,
+        raw_path: str,
+        *,
+        text: str,
+        encoding: str,
+        create_if_missing: bool,
+        escape_profile: str | None = None,
+    ) -> FileOperationResult:
+        """Prepend ``text`` to ``raw_path`` while respecting creation flags."""
+
+        target = self.resolve_path(raw_path)
+        existed = target.exists()
+        if not existed:
+            if not create_if_missing:
+                raise FileOperationError(f"File does not exist: {target}")
+            self._ensure_parent(target, create_parents=True)
+            existing_text = ""
+        else:
+            existing_text = target.read_text(encoding=encoding)
+
+        prepend_text = text or ""
+        if not existed and not prepend_text:
+            # Creating a brand new empty file still counts as a change.
+            target.write_text("", encoding=encoding)
+            message = f"Created empty file at {target}"
+            resulting_text = ""
+            changed = True
+        elif prepend_text:
+            resulting_text = prepend_text + existing_text
+            target.write_text(resulting_text, encoding=encoding)
+            message = (
+                f"Prepended to {target}" if existed else f"Created {target} with prepended content"
+            )
+            changed = True
+        else:
+            resulting_text = existing_text
+            message = f"No changes applied to {target}" if existed else f"Created {target}"
+            changed = not existed
+            if not existed:
+                target.write_text(resulting_text, encoding=encoding)
+
+        return FileOperationResult(
+            path=target,
+            operation="prepend",
+            success=True,
+            changed=changed,
+            encoding=encoding,
+            message=message,
+            content=resulting_text,
+            escape_profile=escape_profile,
+        )
+
     def apply_patch(
         self,
         raw_path: str,
@@ -505,6 +558,85 @@ class FileEditor:
             changed=False,
             encoding=encoding,
             message=f"Metadata for {target}",
+            escape_profile=escape_profile,
+            metadata=metadata,
+        )
+
+    def substitute_text(
+        self,
+        raw_path: str,
+        *,
+        pattern: str,
+        replacement: str,
+        encoding: str,
+        use_regex: bool,
+        ignore_case: bool,
+        max_replacements: int | None,
+        escape_profile: str | None = None,
+    ) -> FileOperationResult:
+        """Perform pattern-based substitution within ``raw_path``."""
+
+        if not pattern:
+            raise FileOperationError("Substitute pattern must not be empty")
+
+        target = self.resolve_path(raw_path)
+        if not target.exists():
+            raise FileOperationError(f"File does not exist: {target}")
+
+        original_text = target.read_text(encoding=encoding)
+        replacements = 0
+        resulting_text = original_text
+
+        if use_regex or ignore_case or max_replacements is not None:
+            flags = re.MULTILINE
+            if ignore_case:
+                flags |= re.IGNORECASE
+            compiled_pattern_text = pattern if use_regex else re.escape(pattern)
+            try:
+                compiled = re.compile(compiled_pattern_text, flags)
+            except re.error as exc:
+                raise FileOperationError(f"Invalid regular expression: {exc}") from exc
+            count = 0 if max_replacements is None else max_replacements
+
+            if use_regex:
+                resulting_text, replacements = compiled.subn(replacement, original_text, count=count)
+            else:
+                def _literal_sub(_match: re.Match[str]) -> str:
+                    return replacement
+
+                resulting_text, replacements = compiled.subn(_literal_sub, original_text, count=count)
+        else:
+            if pattern in original_text:
+                replacements = original_text.count(pattern)
+                resulting_text = original_text.replace(pattern, replacement)
+
+        changed = replacements > 0
+        if changed:
+            target.write_text(resulting_text, encoding=encoding)
+
+        metadata: dict[str, Any] = {
+            "pattern": pattern,
+            "regex": use_regex,
+            "ignore_case": ignore_case,
+            "replacements": replacements,
+        }
+        if max_replacements is not None:
+            metadata["max_replacements"] = max_replacements
+
+        message = (
+            f"Substituted {replacements} occurrence(s)"
+            if replacements
+            else "No matches found for substitute pattern"
+        )
+
+        return FileOperationResult(
+            path=target,
+            operation="substitute",
+            success=True,
+            changed=changed,
+            encoding=encoding,
+            message=message,
+            content=resulting_text,
             escape_profile=escape_profile,
             metadata=metadata,
         )
