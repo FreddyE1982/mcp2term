@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sys
 import time
@@ -190,18 +191,27 @@ class RemoteCommandProcessor:
                 overwrite=command.overwrite,
                 create_if_missing=command.create_if_missing,
                 escape_profile=command.escape_profile,
+                follow_symlinks=command.follow_symlinks,
             )
         except Exception as exc:
             self.error_writer(f"filetool: {exc}")
             self.status_callback(1)
             return 1
 
-        self._render_manage_file_response(response)
+        self._render_manage_file_response(response, output_format=command.output_format)
         status = 0 if response.success else 1
         self.status_callback(status)
         return status
 
-    def _render_manage_file_response(self, response: FileOperationResponse) -> None:
+    def _render_manage_file_response(
+        self,
+        response: FileOperationResponse,
+        *,
+        output_format: str = "human",
+    ) -> None:
+        format_choice = (output_format or "human").strip().lower()
+        if format_choice not in {"human", "json"}:
+            format_choice = "human"
         message = response.message
         if not message:
             if response.success:
@@ -211,6 +221,17 @@ class RemoteCommandProcessor:
         writer = self.output_writer if response.success else self.error_writer
         if message:
             writer(message)
+
+        if response.metadata:
+            if format_choice == "json":
+                serialized = json.dumps(response.metadata, indent=2, sort_keys=True)
+                for line in serialized.splitlines():
+                    writer(line)
+            else:
+                width = max(len(str(key)) for key in response.metadata.keys())
+                for key in sorted(response.metadata.keys()):
+                    value = response.metadata[key]
+                    writer(f"{key:>{width}} : {value}")
 
         if response.lines:
             width = max(len(str(line.number)) for line in response.lines)

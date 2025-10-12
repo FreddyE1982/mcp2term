@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import os
+import stat as stat_module
 import re
 from pathlib import Path
+from typing import Any, Mapping
 
 
 class FileOperationError(RuntimeError):
@@ -33,6 +37,7 @@ class FileOperationResult:
     lines: tuple[FileLine, ...] = tuple()
     line_numbers: tuple[int, ...] = tuple()
     escape_profile: str | None = None
+    metadata: Mapping[str, Any] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Serialize the result into a JSON compatible mapping."""
@@ -56,6 +61,8 @@ class FileOperationResult:
             payload["line_numbers"] = list(self.line_numbers)
         if self.escape_profile is not None:
             payload["escape_profile"] = self.escape_profile
+        if self.metadata is not None:
+            payload["metadata"] = dict(self.metadata)
         return payload
 
 
@@ -411,6 +418,97 @@ class FileEditor:
             escape_profile=escape_profile,
         )
 
+    def stat_file(
+        self,
+        raw_path: str,
+        *,
+        encoding: str,
+        follow_symlinks: bool,
+        escape_profile: str | None = None,
+    ) -> FileOperationResult:
+        """Collect rich filesystem metadata for ``raw_path``.
+
+        The resulting :class:`FileOperationResult` includes a ``metadata`` mapping
+        containing resolved paths, timestamp information, and POSIX-style
+        permission data so both human operators and programmatic clients can act
+        on the inspection results without additional lookups.
+        """
+
+        target = self.resolve_path(raw_path)
+        canonical_path = target.resolve(strict=False)
+        metadata: dict[str, Any] = {
+            "raw_path": raw_path,
+            "resolved_path": str(target),
+            "canonical_path": str(canonical_path),
+            "follow_symlinks": follow_symlinks,
+        }
+
+        def _record_link_target() -> None:
+            if not target.is_symlink():
+                return
+            try:
+                metadata["link_target"] = os.readlink(target)
+            except OSError as exc:
+                metadata["link_target_error"] = str(exc)
+
+        try:
+            stat_result = target.stat(follow_symlinks=follow_symlinks)
+        except FileNotFoundError as exc:
+            _record_link_target()
+            metadata.update(
+                {
+                    "exists": False,
+                    "is_symlink": target.is_symlink(),
+                    "stat_error": str(exc),
+                }
+            )
+            return FileOperationResult(
+                path=target,
+                operation="stat",
+                success=False,
+                changed=False,
+                encoding=encoding,
+                message=f"File not found: {target}",
+                escape_profile=escape_profile,
+                metadata=metadata,
+            )
+
+        file_type = self._describe_file_type(stat_result.st_mode)
+
+        metadata.update(
+            {
+                "exists": True,
+                "file_type": file_type,
+                "is_symlink": target.is_symlink(),
+                "size_bytes": stat_result.st_size,
+                "mode": stat_result.st_mode,
+                "permissions": stat_module.filemode(stat_result.st_mode),
+                "owner": stat_result.st_uid,
+                "group": stat_result.st_gid,
+                "device": stat_result.st_dev,
+                "inode": stat_result.st_ino,
+                "hard_links": stat_result.st_nlink,
+                "accessed_timestamp": stat_result.st_atime,
+                "modified_timestamp": stat_result.st_mtime,
+                "created_timestamp": stat_result.st_ctime,
+                "accessed_at": self._format_timestamp(stat_result.st_atime),
+                "modified_at": self._format_timestamp(stat_result.st_mtime),
+                "created_at": self._format_timestamp(stat_result.st_ctime),
+            }
+        )
+        _record_link_target()
+
+        return FileOperationResult(
+            path=target,
+            operation="stat",
+            success=True,
+            changed=False,
+            encoding=encoding,
+            message=f"Metadata for {target}",
+            escape_profile=escape_profile,
+            metadata=metadata,
+        )
+
     def _ensure_parent(self, target: Path, *, create_parents: bool) -> None:
         parent = target.parent
         if create_parents:
@@ -475,6 +573,28 @@ class FileEditor:
         if trailing_newline and text and not text.endswith("\n"):
             text += "\n"
         target.write_text(text, encoding=encoding)
+
+    @staticmethod
+    def _format_timestamp(value: float) -> str:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+
+    @staticmethod
+    def _describe_file_type(mode: int) -> str:
+        if stat_module.S_ISDIR(mode):
+            return "directory"
+        if stat_module.S_ISLNK(mode):
+            return "symlink"
+        if stat_module.S_ISREG(mode):
+            return "file"
+        if stat_module.S_ISCHR(mode):
+            return "character-device"
+        if stat_module.S_ISBLK(mode):
+            return "block-device"
+        if stat_module.S_ISSOCK(mode):
+            return "socket"
+        if stat_module.S_ISFIFO(mode):
+            return "fifo"
+        return "unknown"
 
 
 _HUNK_HEADER_RE = re.compile(

@@ -210,6 +210,7 @@ class FileOperationResponse:
     content: str | None
     lines: tuple[FileOperationLine, ...]
     line_numbers: tuple[int, ...]
+    metadata: Mapping[str, Any] | None = None
     warnings: tuple[str, ...] = tuple()
 
     @classmethod
@@ -236,6 +237,11 @@ class FileOperationResponse:
                     parsed_numbers.append(int(entry))
                 except (TypeError, ValueError):
                     continue
+        metadata_payload = payload.get("metadata")
+        parsed_metadata: dict[str, Any] | None = None
+        if isinstance(metadata_payload, Mapping):
+            parsed_metadata = {str(key): value for key, value in metadata_payload.items()}
+
         return cls(
             path=str(payload.get("path", "")),
             operation=str(payload.get("operation", "")),
@@ -246,6 +252,7 @@ class FileOperationResponse:
             content=str(payload.get("content")) if payload.get("content") is not None else None,
             lines=tuple(parsed_lines),
             line_numbers=tuple(parsed_numbers),
+            metadata=parsed_metadata,
             warnings=_extract_warnings(payload),
         )
 
@@ -597,6 +604,7 @@ class RemoteMcpSession:
         overwrite: bool = False,
         create_if_missing: bool = True,
         escape_profile: str = "auto",
+        follow_symlinks: bool = True,
     ) -> FileOperationResponse:
         try:
             response = self._submit_request(
@@ -612,6 +620,7 @@ class RemoteMcpSession:
                 overwrite=overwrite,
                 create_if_missing=create_if_missing,
                 escape_profile=escape_profile,
+                follow_symlinks=follow_symlinks,
             )
         except Exception as exc:
             self._emit_warning(
@@ -875,6 +884,8 @@ class RemoteMcpSession:
                             bool(request.payload.get("create_parents", False)),
                             bool(request.payload.get("overwrite", False)),
                             bool(request.payload.get("create_if_missing", True)),
+                            str(request.payload.get("escape_profile", "auto")),
+                            bool(request.payload.get("follow_symlinks", True)),
                         )
                         request.future.set_result(result)
                         self._emit_warnings(result.warnings)
@@ -1010,6 +1021,8 @@ class RemoteMcpSession:
         create_parents: bool,
         overwrite: bool,
         create_if_missing: bool,
+        escape_profile: str,
+        follow_symlinks: bool,
     ) -> FileOperationResponse:
         if self._session is None:
             raise RuntimeError("RemoteMcpSession used before start()")
@@ -1020,6 +1033,8 @@ class RemoteMcpSession:
             "create_parents": create_parents,
             "overwrite": overwrite,
             "create_if_missing": create_if_missing,
+            "escape_profile": escape_profile,
+            "follow_symlinks": follow_symlinks,
         }
         if content is not None:
             arguments["content"] = content

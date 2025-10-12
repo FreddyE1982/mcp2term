@@ -31,6 +31,7 @@ _ALLOWED_OPERATIONS = (
     "locate",
     "patch",
     "print",
+    "stat",
     "replace",
     "write",
 )
@@ -205,6 +206,8 @@ class ManageFileCommand:
     overwrite: bool
     create_if_missing: bool
     escape_profile: str
+    follow_symlinks: bool
+    output_format: str
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -216,7 +219,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def _create_parser() -> _ArgumentParser:
     description = (
-        "Call the server's manage_file tool to create, modify, or inspect remote files."
+        "Call the server's manage_file tool to create, modify, inspect, or inventory remote files."
     )
     epilog = """Operations:
   create   Create or overwrite a file with optional content.
@@ -228,6 +231,7 @@ def _create_parser() -> _ArgumentParser:
   print    Display the requested line range with numbering.
   locate   Report line numbers containing the provided search text.
   patch    Apply a unified diff patch to an existing file.
+  stat     Display filesystem metadata for the target path.
 """
     parser = _ArgumentParser(
         prog="filetool",
@@ -276,6 +280,16 @@ def _create_parser() -> _ArgumentParser:
         help="Text encoding used when reading or writing files.",
     )
     parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("human", "json"),
+        default="human",
+        help=(
+            "Select the local rendering style for responses. "
+            "The 'human' format prints descriptive text while 'json' emits machine-readable metadata."
+        ),
+    )
+    parser.add_argument(
         "--line",
         type=int,
         help="Line number used by the insert operation.",
@@ -318,6 +332,19 @@ def _create_parser() -> _ArgumentParser:
         action="store_false",
         dest="create_if_missing",
         help="Require append to target an existing file.",
+    )
+    parser.add_argument(
+        "--follow-symlinks",
+        dest="follow_symlinks",
+        action="store_true",
+        default=True,
+        help="Follow symbolic links when inspecting metadata (default).",
+    )
+    parser.add_argument(
+        "--no-follow-symlinks",
+        dest="follow_symlinks",
+        action="store_false",
+        help="Inspect symbolic link metadata without resolving the target.",
     )
     return parser
 
@@ -372,6 +399,9 @@ def parse_manage_file_command(
 
     _validate_arguments(operation, line, start_line, end_line, content)
 
+    if operation == "stat":
+        content = None
+
     return ManageFileCommand(
         operation=operation,
         path=path,
@@ -384,6 +414,8 @@ def parse_manage_file_command(
         overwrite=bool(namespace.overwrite),
         create_if_missing=bool(namespace.create_if_missing),
         escape_profile=escape_profile,
+        follow_symlinks=bool(namespace.follow_symlinks),
+        output_format=str(namespace.output_format),
     )
 
 
@@ -440,6 +472,13 @@ def _validate_arguments(
     content: str | None,
 ) -> None:
     """Validate operation-specific requirements."""
+
+    if operation == "stat":
+        # Metadata inspections accept dedicated filters that do not overlap with the
+        # traditional line-focused options. Skip the remaining validation logic so
+        # forward-compatible filters can be introduced without tightening checks
+        # here prematurely.
+        return
 
     if line is not None:
         if line <= 0:

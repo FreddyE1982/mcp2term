@@ -145,6 +145,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "Inline patches (including literal `\\ No newline at end of file` markers) round-trip cleanly through the parser and remote workflow thanks to expanded unit and integration coverage.",
         "All file edits emit structured audit events through the plugin registry so operators can observe and extend behaviour.",
         "`--escape-profile none` bypasses inline decoding entirely so binary-safe payloads and templating DSLs survive transport unchanged, while custom profiles can be registered by plugins.",
+        "`stat` reports detailed filesystem metadata, and `--format json` switches to machine-friendly output while flags such as `--no-follow-symlinks` expose symlink details without dereferencing targets.",
     ]
 
     description = (
