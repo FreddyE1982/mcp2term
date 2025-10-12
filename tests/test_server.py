@@ -1,6 +1,7 @@
 """Tests for the MCP server factory and plugin exposure."""
 
 import asyncio
+import multiprocessing
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,12 @@ from mcp2term.plugin import (
     PluginRegistry,
     ServerWarningEvent,
 )
-from mcp2term.server import create_server
+from mcp2term.server import (
+    ChatBridgeEnvelope,
+    UserChatBridge,
+    _ENVELOPE_KIND_STOP,
+    create_server,
+)
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -102,3 +108,36 @@ def test_plugin_manager_emits_file_operation_event(tmp_path: Path, use_real_depe
     assert recorded.result.encoding == "utf-8"
     assert recorded.raw_path == "demo.txt"
     assert recorded.arguments["path"] == "demo.txt"
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_chat_bridge_requires_queue_initialisation(use_real_dependencies: bool) -> None:
+    manager = PluginManager()
+    bridge = UserChatBridge(plugin_manager=manager, console_echo=False)
+    bridge._qt_available = True
+
+    with pytest.raises(RuntimeError):
+        bridge._start_gui_process()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_chat_bridge_message_pump_handles_stop_signal(use_real_dependencies: bool) -> None:
+    manager = PluginManager()
+    bridge = UserChatBridge(plugin_manager=manager, console_echo=False)
+    bridge._message_queue = multiprocessing.Queue()
+
+    async def _exercise_pump() -> None:
+        task = asyncio.create_task(bridge._message_pump())
+        await asyncio.sleep(0)
+        assert bridge._message_queue is not None
+        bridge._message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
+        await task
+
+    asyncio.run(_exercise_pump())
+
+    assert bridge._pump_cancel_scope is None
+
+    assert bridge._message_queue is not None
+    bridge._message_queue.close()
+    bridge._message_queue.join_thread()
+    bridge._message_queue = None

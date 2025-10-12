@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
-import signal
+import multiprocessing
 import os
+import signal
 import sys
-import threading
 import weakref
 from datetime import datetime
-from queue import Queue
+from multiprocessing import Process
+from multiprocessing.queues import Queue as MultiprocessingQueue
+from queue import Empty
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -39,6 +41,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class ChatBridgeEnvelope:
+    """Container for inter-process chat bridge messages."""
+
+    kind: str
+    payload: str | None = None
+
+
+_ENVELOPE_KIND_MESSAGE = "message"
+_ENVELOPE_KIND_STOP = "stop"
+_ENVELOPE_KIND_SHUTDOWN = "shutdown"
+_ENVELOPE_KIND_APPEND = "append"
+
+
+@dataclass(slots=True)
 class ApplicationState:
     """Objects shared across MCP requests."""
 
@@ -51,10 +67,11 @@ class ApplicationState:
 class UserChatBridge:
     """Coordinate the optional PyQt5-based chat window for server-side messaging.
 
-    The bridge spins up a PyQt5 user interface in a dedicated thread whenever the
-    environment provides a display server and the :mod:`PyQt5` package is
-    available. Messages entered into the window propagate to all connected MCP
-    sessions as informational log events prefixed with the mandatory alert text.
+    The bridge spins up a PyQt5 user interface within a dedicated helper process
+    whenever the environment provides a display server and the :mod:`PyQt5`
+    package is available. Messages entered into the window propagate to all
+    connected MCP sessions as informational log events prefixed with the
+    mandatory alert text.
 
     The implementation purposely avoids monkey patching or simulation so the
     live server infrastructure remains untouched. Message dispatch occurs via
@@ -68,15 +85,14 @@ class UserChatBridge:
     def __init__(self, *, plugin_manager: PluginManager, console_echo: bool) -> None:
         self._plugin_manager = plugin_manager
         self._console_echo = console_echo
-        self._queue: Queue[str | object] = Queue()
+        self._message_queue: MultiprocessingQueue[ChatBridgeEnvelope] | None = None
+        self._control_queue: MultiprocessingQueue[ChatBridgeEnvelope] | None = None
         self._sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
-        self._qt_widgets = None
-        self._qt_core = None
-        self._qt_app = None
-        self._qt_thread: threading.Thread | None = None
+        self._gui_process: Process | None = None
         self._task_group: AnyIOTaskGroup | None = None
         self._active = False
         self._pump_cancel_scope: anyio.CancelScope | None = None
+        self._qt_available = False
         self._initialize_qt_support()
 
     def _initialize_qt_support(self) -> None:
@@ -91,8 +107,7 @@ class UserChatBridge:
             logger.warning("PyQt5 is unavailable; user chat window disabled: %s", exc)
             return
 
-        self._qt_widgets = QtWidgets
-        self._qt_core = QtCore
+        self._qt_available = True
 
     @property
     def is_active(self) -> bool:
@@ -114,17 +129,19 @@ class UserChatBridge:
         self._sessions.add(session)
 
     async def __aenter__(self) -> "UserChatBridge":
-        """Start background tasks and GUI thread when PyQt5 support is present."""
+        """Start background tasks and GUI helper process when PyQt5 support is present."""
 
-        if self._qt_widgets is None or self._qt_core is None:
+        if not self._qt_available:
             logger.info("User chat bridge inactive: PyQt5 support not detected.")
             self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
             return self
 
+        self._message_queue = multiprocessing.Queue()
+        self._control_queue = multiprocessing.Queue()
         self._task_group = await anyio.create_task_group().__aenter__()
         try:
             self._task_group.start_soon(self._message_pump)
-            self._start_gui_thread()
+            self._start_gui_process()
         except Exception:
             await self._shutdown_tasks()
             raise
@@ -135,7 +152,7 @@ class UserChatBridge:
         return self
 
     async def __aexit__(self, exc_type, exc, exc_tb) -> None:
-        """Shut down the GUI thread and message pump."""
+        """Shut down the GUI helper process and message pump."""
 
         await self._shutdown_tasks()
 
@@ -144,147 +161,83 @@ class UserChatBridge:
 
         if self._pump_cancel_scope is not None:
             self._pump_cancel_scope.cancel()
-        self._queue.put(self._SENTINEL)
+        if self._message_queue is not None:
+            try:
+                self._message_queue.put_nowait(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Failed to notify message pump about shutdown")
+        if self._control_queue is not None:
+            try:
+                self._control_queue.put_nowait(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_SHUTDOWN))
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Failed to notify PyQt process about shutdown")
 
         if self._task_group is not None:
             await self._task_group.__aexit__(None, None, None)
             self._task_group = None
 
-        if self._qt_core is not None and self._qt_app is not None:
-            try:  # pragma: no cover - GUI teardown
-                self._qt_core.QMetaObject.invokeMethod(
-                    self._qt_app,  # type: ignore[arg-type]
-                    "quit",
-                    self._qt_core.Qt.QueuedConnection,
-                )
-            except Exception:
-                logger.exception("Failed to request PyQt5 application shutdown")
-
-        if self._qt_thread is not None:
-            self._qt_thread.join(timeout=5)
-            self._qt_thread = None
+        if self._gui_process is not None:
+            self._gui_process.join(timeout=5)
+            if self._gui_process.is_alive():
+                self._gui_process.terminate()
+                self._gui_process.join(timeout=2)
+            self._gui_process = None
 
         self._plugin_manager.register_export("mcp2term.user_chat.bridge", None)
         self._active = False
-        self._qt_app = None
-        self._queue = Queue()
+        if self._message_queue is not None:
+            self._message_queue.close()
+            self._message_queue.join_thread()
+        if self._control_queue is not None:
+            self._control_queue.close()
+            self._control_queue.join_thread()
+        self._message_queue = None
+        self._control_queue = None
         self._sessions = weakref.WeakSet()
         self._pump_cancel_scope = None
 
-    def _start_gui_thread(self) -> None:
-        """Launch the PyQt5 UI loop on a dedicated daemon thread."""
+    def _start_gui_process(self) -> None:
+        """Launch the PyQt5 UI loop inside a dedicated helper process."""
 
-        if self._qt_widgets is None or self._qt_core is None:
+        if not self._qt_available:
             return
-        if self._qt_thread is not None and self._qt_thread.is_alive():
+        if self._message_queue is None or self._control_queue is None:
+            raise RuntimeError("Chat bridge queues must be initialised before starting the GUI process")
+        if self._gui_process is not None and self._gui_process.is_alive():
             return
 
-        self._qt_thread = threading.Thread(
-            target=self._run_qt_application,
+        self._gui_process = Process(
+            target=_run_pyqt_bridge_process,
             name="mcp2term-user-chat-ui",
             daemon=True,
+            args=(self._message_queue, self._control_queue),
         )
-        self._qt_thread.start()
-
-    def _run_qt_application(self) -> None:  # pragma: no cover - GUI behaviour
-        """Create and execute the PyQt5 application."""
-
-        assert self._qt_widgets is not None and self._qt_core is not None
-        QtWidgets = self._qt_widgets
-        QtCore = self._qt_core
-
-        app = QtWidgets.QApplication.instance()
-        created_app = False
-        if app is None:
-            app = QtWidgets.QApplication(["mcp2term-user-chat"])
-            created_app = True
-        self._qt_app = app
-
-        queue_put = self._queue.put
-
-        class ChatWindow(QtWidgets.QMainWindow):
-            """Interactive window emitting chat messages to connected clients."""
-
-            def __init__(self) -> None:
-                super().__init__()
-                self.setWindowTitle("mcp2term User Message Bridge")
-                self.setMinimumWidth(480)
-                self.setMinimumHeight(320)
-                self._build_interface()
-
-            def _build_interface(self) -> None:
-                container = QtWidgets.QWidget(self)
-                layout = QtWidgets.QVBoxLayout(container)
-
-                headline = QtWidgets.QLabel(
-                    (
-                        "Enter a message to broadcast immediately to all connected "
-                        "MCP clients. Messages are delivered as informational log "
-                        "entries and appear inline with command output."
-                    ),
-                    self,
-                )
-                headline.setWordWrap(True)
-                layout.addWidget(headline)
-
-                self._history = QtWidgets.QTextEdit(self)
-                self._history.setReadOnly(True)
-                self._history.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
-                self._history.setPlaceholderText("No messages have been sent yet.")
-                layout.addWidget(self._history)
-
-                input_row = QtWidgets.QHBoxLayout()
-                self._input = QtWidgets.QLineEdit(self)
-                self._input.setPlaceholderText("Type the message to send to clients...")
-                input_row.addWidget(self._input)
-
-                send_button = QtWidgets.QPushButton("Send", self)
-                input_row.addWidget(send_button)
-                layout.addLayout(input_row)
-
-                container.setLayout(layout)
-                self.setCentralWidget(container)
-
-                send_button.clicked.connect(self._on_send_clicked)  # type: ignore[arg-type]
-                self._input.returnPressed.connect(self._on_send_clicked)  # type: ignore[arg-type]
-
-            def _append_history(self, text: str) -> None:
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                self._history.append(f"{timestamp}  {text}")
-
-            def _on_send_clicked(self) -> None:
-                text = self._input.text().strip()
-                if not text:
-                    return
-                self._input.clear()
-                self._append_history(f"You: {text}")
-                queue_put(text)
-
-            def closeEvent(self, event: "QtGui.QCloseEvent") -> None:  # type: ignore[name-defined]
-                event.ignore()
-                self.hide()
-
-        from PyQt5 import QtGui  # type: ignore  # noqa: WPS433
-
-        window = ChatWindow()
-        window.show()
-
-        app.exec_()
-
-        if created_app:
-            app.quit()
+        self._gui_process.start()
 
     async def _message_pump(self) -> None:
         """Continuously deliver user messages to all tracked sessions."""
 
+        queue = self._message_queue
+        if queue is None:
+            logger.debug("Message pump aborted because queues are uninitialised.")
+            return
+
         with anyio.CancelScope() as scope:
             self._pump_cancel_scope = scope
             while True:
-                item = await anyio.to_thread.run_sync(self._queue.get)
-                if item is self._SENTINEL:
+                try:
+                    envelope = await anyio.to_thread.run_sync(queue.get)
+                except (EOFError, OSError):  # pragma: no cover - unexpected transport failure
+                    logger.warning("Chat bridge queue closed unexpectedly; stopping message pump")
                     break
-                assert isinstance(item, str)
-                await self._broadcast_message(item)
+                if not isinstance(envelope, ChatBridgeEnvelope):
+                    logger.debug("Ignoring unexpected payload from chat bridge: %r", envelope)
+                    continue
+                if envelope.kind == _ENVELOPE_KIND_STOP:
+                    break
+                if envelope.kind == _ENVELOPE_KIND_MESSAGE and envelope.payload:
+                    await self._broadcast_message(envelope.payload)
+        self._pump_cancel_scope = None
 
     async def _broadcast_message(self, message: str) -> None:
         """Send ``message`` to every connected session as a log entry."""
@@ -307,6 +260,124 @@ class UserChatBridge:
         )
         if self._console_echo:
             print(formatted, flush=True)
+
+
+def _run_pyqt_bridge_process(
+    message_queue: MultiprocessingQueue[ChatBridgeEnvelope],
+    control_queue: MultiprocessingQueue[ChatBridgeEnvelope],
+) -> None:  # pragma: no cover - requires PyQt5 GUI environment
+    """Entry point executed in a helper process to host the PyQt5 chat window."""
+
+    try:
+        from PyQt5 import QtCore, QtGui, QtWidgets  # type: ignore
+    except Exception:  # pragma: no cover - defensive import logging
+        logging.exception("Unable to import PyQt5; user chat window will not start")
+        return
+
+    app = QtWidgets.QApplication.instance()
+    created_app = False
+    if app is None:
+        app = QtWidgets.QApplication(["mcp2term-user-chat"])
+        created_app = True
+
+    class ChatWindow(QtWidgets.QMainWindow):
+        """Interactive window emitting chat messages to the parent process."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("mcp2term User Message Bridge")
+            self.setMinimumWidth(480)
+            self.setMinimumHeight(320)
+            self._build_interface()
+
+        def _build_interface(self) -> None:
+            container = QtWidgets.QWidget(self)
+            layout = QtWidgets.QVBoxLayout(container)
+
+            headline = QtWidgets.QLabel(
+                (
+                    "Enter a message to broadcast immediately to all connected "
+                    "MCP clients. Messages are delivered as informational log "
+                    "entries and appear inline with command output."
+                ),
+                self,
+            )
+            headline.setWordWrap(True)
+            layout.addWidget(headline)
+
+            self._history = QtWidgets.QTextEdit(self)
+            self._history.setReadOnly(True)
+            self._history.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
+            self._history.setPlaceholderText("No messages have been sent yet.")
+            layout.addWidget(self._history)
+
+            input_row = QtWidgets.QHBoxLayout()
+            self._input = QtWidgets.QLineEdit(self)
+            self._input.setPlaceholderText("Type the message to send to clients...")
+            input_row.addWidget(self._input)
+
+            send_button = QtWidgets.QPushButton("Send", self)
+            input_row.addWidget(send_button)
+            layout.addLayout(input_row)
+
+            container.setLayout(layout)
+            self.setCentralWidget(container)
+
+            send_button.clicked.connect(self._on_send_clicked)  # type: ignore[arg-type]
+            self._input.returnPressed.connect(self._on_send_clicked)  # type: ignore[arg-type]
+
+        def _append_history(self, text: str) -> None:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self._history.append(f"{timestamp}  {text}")
+
+        def _on_send_clicked(self) -> None:
+            text = self._input.text().strip()
+            if not text:
+                return
+            self._input.clear()
+            self._append_history(f"You: {text}")
+            message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_MESSAGE, payload=text))
+
+        def closeEvent(self, event: "QtGui.QCloseEvent") -> None:  # type: ignore[name-defined]
+            event.ignore()
+            self.hide()
+
+    window = ChatWindow()
+    window.show()
+
+    def _drain_control_queue() -> None:
+        while True:
+            try:
+                envelope = control_queue.get_nowait()
+            except Empty:
+                break
+            except (EOFError, OSError):  # pragma: no cover - parent process terminated
+                app.quit()
+                return
+            if isinstance(envelope, ChatBridgeEnvelope):
+                if envelope.kind == _ENVELOPE_KIND_SHUTDOWN:
+                    app.quit()
+                elif envelope.kind == _ENVELOPE_KIND_APPEND and envelope.payload:
+                    window._append_history(envelope.payload)
+            else:  # pragma: no cover - defensive logging
+                logging.getLogger(__name__).debug(
+                    "Ignoring unexpected control payload in PyQt process: %r", envelope
+                )
+
+    poll_timer = QtCore.QTimer()
+    poll_timer.setInterval(100)
+    poll_timer.timeout.connect(_drain_control_queue)  # type: ignore[arg-type]
+    poll_timer.start()
+
+    app.exec_()
+
+    try:
+        message_queue.put(ChatBridgeEnvelope(kind=_ENVELOPE_KIND_STOP))
+    except Exception:  # pragma: no cover - queue already closed
+        logging.getLogger(__name__).debug("Unable to notify parent about PyQt shutdown")
+
+    if created_app:
+        app.quit()
 
 
 def _serialize_result(result: CommandResult, *, timed_out: bool) -> dict[str, Any]:

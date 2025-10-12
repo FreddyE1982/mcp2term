@@ -60,3 +60,7 @@
 ## Persistent user chat transcripts
 - **Purpose:** Preserve the PyQt5 chat window history across server restarts so operational directives sent from the supervising user remain auditable.
 - **Usage:** Extend the new `UserChatBridge` with pluggable transcript writers that stream each emitted message into structured storage (for example, newline-delimited JSON). Provide rotation policies, remote sinks (such as syslog or HTTP POST targets), and tooling to replay transcripts into the MCP logging bus when a client reconnects mid-session.
+
+## Interactive chat status mirroring
+- **Purpose:** Surface delivery acknowledgements, failure diagnostics, and plugin-generated notices inside the PyQt5 helper process so operators receive immediate visual feedback without consulting logs.
+- **Usage:** Expand the inter-process control queue to forward server-generated status messages using the existing `_ENVELOPE_KIND_APPEND` envelope. Add bridge hooks that format status updates, append them to the GUI history pane, and optionally highlight warnings or errors with colour-coded text for rapid operator assessment.
