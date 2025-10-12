@@ -521,3 +521,136 @@ def test_manage_file_command_executes_remote_operations(
                     )
             finally:
                 session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_manage_file_out_of_range_keeps_session_alive(
+    use_real_dependencies: bool,
+) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        target_dir = "mcp-file-tests"
+        try:
+            cwd = session.resolve_working_directory()
+            state = RemoteShellState(cwd=cwd)
+            statuses: list[int] = []
+            outputs: list[str] = []
+            errors: list[str] = []
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: outputs.append(message),
+                error_writer=lambda message: errors.append(message),
+            )
+
+            unique_name = f"mcp-file-{uuid.uuid4().hex}.txt"
+            relative_path = f"{target_dir}/{unique_name}"
+
+            outputs.clear()
+            errors.clear()
+            create_status = processor.execute(
+                f"filetool create {relative_path} --content placeholder --create-parents --overwrite"
+            )
+            assert create_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+
+            outputs.clear()
+            errors.clear()
+            invalid_status = processor.execute(
+                f"filetool print {relative_path} --start-line 480 --end-line 480"
+            )
+            assert invalid_status != 0
+            assert statuses and statuses[-1] != 0
+            assert any(
+                "Start line 480 is beyond the end of the file" in message for message in errors
+            )
+
+            outputs.clear()
+            errors.clear()
+            follow_up_status = processor.execute(f"filetool print {relative_path}")
+            assert follow_up_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert outputs
+        finally:
+            try:
+                session.run_command(
+                    f"rm -rf {shlex.quote(target_dir)}",
+                    working_directory=session.resolve_working_directory(),
+                    environment=None,
+                )
+            finally:
+                session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_manage_file_warning_notice_failure_does_not_terminate_session(
+    use_real_dependencies: bool,
+) -> None:
+    triggered: list[str] = []
+
+    def faulty_notice(message: str) -> None:
+        triggered.append(message)
+        raise RuntimeError("sink failure")
+
+    with running_server() as url:
+        session = RemoteMcpSession(url, notice_writer=faulty_notice)
+        session.start()
+        target_dir = "mcp-notice-tests"
+        try:
+            cwd = session.resolve_working_directory()
+            state = RemoteShellState(cwd=cwd)
+            statuses: list[int] = []
+            outputs: list[str] = []
+            errors: list[str] = []
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: outputs.append(message),
+                error_writer=lambda message: errors.append(message),
+            )
+
+            unique_name = f"mcp-file-{uuid.uuid4().hex}.txt"
+            relative_path = f"{target_dir}/{unique_name}"
+
+            outputs.clear()
+            errors.clear()
+            create_status = processor.execute(
+                f"filetool create {relative_path} --content sentinel --create-parents --overwrite"
+            )
+            assert create_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+
+            outputs.clear()
+            errors.clear()
+            invalid_status = processor.execute(
+                f"filetool print {relative_path} --start-line 480 --end-line 480"
+            )
+            assert invalid_status != 0
+            assert statuses and statuses[-1] != 0
+            assert any(
+                "Start line 480 is beyond the end of the file" in message for message in errors
+            )
+            assert triggered, "notice writer should receive at least one warning"
+
+            outputs.clear()
+            errors.clear()
+            follow_up_status = processor.execute(f"filetool print {relative_path}")
+            assert follow_up_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert outputs
+        finally:
+            try:
+                session.run_command(
+                    f"rm -rf {shlex.quote(target_dir)}",
+                    working_directory=session.resolve_working_directory(),
+                    environment=None,
+                )
+            finally:
+                session.close()

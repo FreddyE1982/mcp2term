@@ -80,3 +80,7 @@
 ## Console stream observability hooks
 - **Purpose:** Expose metrics and structured events from the new pause-aware console stream proxies so that monitoring systems can alert when output buffering persists or grows unexpectedly.
 - **Usage:** Introduce a registry of observers that receive callbacks whenever `ConsoleStreamProxy` transitions between paused and active states or flushes buffered output. Observers should record buffering duration, data volume, and caller metadata so operators can diagnose slow consumers or misbehaving plugins. Provide sample integrations for Prometheus and OpenTelemetry exporters.
+
+## Warning delivery health monitoring
+- **Purpose:** Detect when client-side warning sinks repeatedly fail so operators can proactively repair integrations before users lose critical diagnostics.
+- **Usage:** Track notice-writer failures within `RemoteMcpSession`, exposing counters and backoff strategies through telemetry hooks. When repeated failures occur, escalate by surfacing a consolidated status banner to the interactive shell and emitting structured events to plugins so downstream observability pipelines can alert maintainers.

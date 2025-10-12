@@ -443,7 +443,10 @@ class RemoteMcpSession:
             logger.warning(text, exc_info=exception)
         else:
             logger.warning(text)
-        self._notice_writer(prefixed)
+        try:
+            self._notice_writer(prefixed)
+        except Exception as writer_error:  # pragma: no cover - defensive logging
+            logger.error("Failed to deliver warning notice", exc_info=writer_error)
 
     def _emit_warnings(self, warnings: Iterable[str]) -> None:
         for warning in warnings:
@@ -688,6 +691,14 @@ class RemoteMcpSession:
     def _handle_request_failure(self, request: _Request, error: Exception) -> bool:
         if request.future.cancelled():
             return True
+
+        def _finalize(response: object) -> bool:
+            warnings: Iterable[str] = getattr(response, "warnings", tuple())  # type: ignore[attr-defined]
+            if not request.future.done():
+                request.future.set_result(response)
+            self._emit_warnings(warnings)
+            return True
+
         action = request.action
         if action == "call_tool":
             payload = request.payload
@@ -716,9 +727,7 @@ class RemoteMcpSession:
                 pty_allocated=bool(payload.get("allocate_pty", False)),
                 warnings=(warning_message,),
             )
-            request.future.set_result(response)
-            self._emit_warnings(response.warnings)
-            return True
+            return _finalize(response)
         if action == "cancel_command":
             command_id = str(request.payload.get("command_id", ""))
             warning_message = f"Failed to cancel command {command_id}: {error}"
@@ -729,9 +738,7 @@ class RemoteMcpSession:
                 delivered=False,
                 warnings=(warning_message,),
             )
-            request.future.set_result(response)
-            self._emit_warnings(response.warnings)
-            return True
+            return _finalize(response)
         if action == "send_stdin":
             command_id = str(request.payload.get("command_id", ""))
             warning_message = f"Failed to send input to command {command_id}: {error}"
@@ -741,9 +748,7 @@ class RemoteMcpSession:
                 eof=bool(request.payload.get("eof", False)),
                 warnings=(warning_message,),
             )
-            request.future.set_result(response)
-            self._emit_warnings(response.warnings)
-            return True
+            return _finalize(response)
         if action == "manage_file":
             raw_path = request.payload.get("path", "")
             path = str(raw_path) if raw_path is not None else ""
@@ -764,9 +769,7 @@ class RemoteMcpSession:
                 line_numbers=tuple(),
                 warnings=(message,),
             )
-            request.future.set_result(response)
-            self._emit_warnings(response.warnings)
-            return True
+            return _finalize(response)
         return False
 
     async def _session_worker(self) -> None:
