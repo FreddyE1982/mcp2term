@@ -1022,6 +1022,11 @@ def create_server(
         use_regex: bool = False,
         ignore_case: bool = False,
         max_replacements: int | None = None,
+        anchor: str | None = None,
+        anchor_use_regex: bool = False,
+        anchor_ignore_case: bool = False,
+        anchor_after: bool = False,
+        anchor_occurrence: int | None = None,
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         state = ctx.request_context.lifespan_context
@@ -1053,6 +1058,16 @@ def create_server(
             request_arguments["end_line"] = end_line
         if max_replacements is not None:
             request_arguments["max_replacements"] = max_replacements
+        if anchor is not None:
+            request_arguments["anchor"] = anchor
+        if anchor_use_regex:
+            request_arguments["anchor_use_regex"] = anchor_use_regex
+        if anchor_ignore_case:
+            request_arguments["anchor_ignore_case"] = anchor_ignore_case
+        if anchor_after:
+            request_arguments["anchor_after"] = anchor_after
+        if anchor_occurrence is not None:
+            request_arguments["anchor_occurrence"] = anchor_occurrence
 
         def _failure(message: str) -> FileOperationResult:
             return FileOperationResult(
@@ -1120,17 +1135,42 @@ def create_server(
                         escape_profile=escape_profile,
                     )
                 case "insert":
-                    if line is None:
-                        raise FileOperationError("Insert operation requires a line number")
                     if content is None:
                         raise FileOperationError("Insert operation requires content text")
-                    result = editor.insert_lines(
-                        path,
-                        line=line,
-                        text=content,
-                        encoding=encoding,
-                        escape_profile=escape_profile,
-                    )
+                    if anchor is not None:
+                        occurrence_value = anchor_occurrence or 1
+                        result = editor.insert_lines_at_anchor(
+                            path,
+                            anchor_text=anchor,
+                            text=content,
+                            encoding=encoding,
+                            after=anchor_after,
+                            occurrence=occurrence_value,
+                            use_regex=anchor_use_regex,
+                            ignore_case=anchor_ignore_case,
+                            escape_profile=escape_profile,
+                        )
+                    else:
+                        if any(
+                            [
+                                anchor_use_regex,
+                                anchor_ignore_case,
+                                anchor_after,
+                                anchor_occurrence is not None,
+                            ]
+                        ):
+                            raise FileOperationError(
+                                "Anchor modifiers cannot be used without anchor text",
+                            )
+                        if line is None:
+                            raise FileOperationError("Insert operation requires a line number")
+                        result = editor.insert_lines(
+                            path,
+                            line=line,
+                            text=content,
+                            encoding=encoding,
+                            escape_profile=escape_profile,
+                        )
                 case "replace":
                     if start_line is None:
                         raise FileOperationError("Replace operation requires start_line")

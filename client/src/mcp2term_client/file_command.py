@@ -216,6 +216,11 @@ class ManageFileCommand:
     use_regex: bool
     ignore_case: bool
     max_replacements: int | None
+    anchor_text: str | None
+    anchor_use_regex: bool
+    anchor_ignore_case: bool
+    anchor_after: bool
+    anchor_occurrence: int | None
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -234,7 +239,7 @@ def _create_parser() -> _ArgumentParser:
   write    Replace the entire file contents.
   append   Append text to the end of a file, optionally creating it.
   prepend  Insert text at the beginning of a file while honouring creation flags.
-  insert   Insert new lines before the specified line number.
+  insert   Insert new lines before a line number or text anchor.
   replace  Replace a range of lines with new content.
   delete   Remove a range of lines entirely.
   print    Display the requested line range with numbering.
@@ -316,6 +321,47 @@ def _create_parser() -> _ArgumentParser:
         type=int,
         help=(
             "Limit the number of replacements performed by substitute. Omit the option to replace all matches."
+        ),
+    )
+    parser.add_argument(
+        "--anchor",
+        dest="anchor",
+        help=(
+            "Anchor text used by the insert operation to automatically locate the insertion point."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-from-file",
+        dest="anchor_file",
+        help="Load anchor text from a local file using the specified encoding.",
+    )
+    parser.add_argument(
+        "--anchor-regex",
+        dest="anchor_use_regex",
+        action="store_true",
+        default=False,
+        help="Interpret the anchor text as a Python regular expression when inserting.",
+    )
+    parser.add_argument(
+        "--anchor-ignore-case",
+        dest="anchor_ignore_case",
+        action="store_true",
+        default=False,
+        help="Perform case-insensitive anchor matching (works with literal and regex anchors).",
+    )
+    parser.add_argument(
+        "--anchor-after",
+        dest="anchor_after",
+        action="store_true",
+        default=False,
+        help="Insert content after the matched anchor line instead of before it.",
+    )
+    parser.add_argument(
+        "--anchor-occurrence",
+        dest="anchor_occurrence",
+        type=int,
+        help=(
+            "When multiple lines match the anchor, choose which occurrence to target (1-based index)."
         ),
     )
     parser.add_argument(
@@ -440,11 +486,20 @@ def parse_manage_file_command(
         encoding=namespace.encoding,
         operation=operation,
     )
+    anchor_text = _resolve_anchor(
+        namespace,
+        encoding=namespace.encoding,
+        operation=operation,
+        usage=usage,
+    )
     path = namespace.path
     encoding = namespace.encoding
     line = namespace.line
     start_line = namespace.start_line
     end_line = namespace.end_line
+    anchor_occurrence = namespace.anchor_occurrence
+    if anchor_text is not None and anchor_occurrence is None:
+        anchor_occurrence = 1
 
     _validate_arguments(
         operation,
@@ -456,6 +511,11 @@ def parse_manage_file_command(
         bool(namespace.use_regex),
         bool(namespace.ignore_case),
         namespace.max_replacements,
+        anchor_text,
+        bool(namespace.anchor_use_regex),
+        bool(namespace.anchor_ignore_case),
+        bool(namespace.anchor_after),
+        anchor_occurrence,
     )
 
     if operation == "stat":
@@ -479,6 +539,11 @@ def parse_manage_file_command(
         use_regex=bool(namespace.use_regex),
         ignore_case=bool(namespace.ignore_case),
         max_replacements=namespace.max_replacements,
+        anchor_text=anchor_text,
+        anchor_use_regex=bool(namespace.anchor_use_regex),
+        anchor_ignore_case=bool(namespace.anchor_ignore_case),
+        anchor_after=bool(namespace.anchor_after),
+        anchor_occurrence=anchor_occurrence,
     )
 
 
@@ -568,6 +633,54 @@ def _resolve_pattern(
     return namespace.pattern
 
 
+def _resolve_anchor(
+    namespace: argparse.Namespace,
+    *,
+    encoding: str,
+    operation: str,
+    usage: str,
+) -> str | None:
+    """Resolve anchor text for the insert operation."""
+
+    sources = [
+        name
+        for name, enabled in {
+            "anchor": namespace.anchor is not None,
+            "anchor_file": namespace.anchor_file is not None,
+        }.items()
+        if enabled
+    ]
+    if operation != "insert" and sources:
+        raise FileCommandParseError(
+            "Anchor arguments are only valid for the insert operation",
+            usage=usage,
+        )
+    if len(sources) > 1:
+        raise FileCommandParseError(
+            "Only one of --anchor or --anchor-from-file may be provided.",
+            usage=usage,
+        )
+    if not sources:
+        return None
+
+    if namespace.anchor_file is not None:
+        path = Path(namespace.anchor_file).expanduser()
+        try:
+            text = path.read_text(encoding=encoding)
+        except FileNotFoundError as exc:
+            raise FileCommandParseError(f"Anchor file not found: {path}") from exc
+        except OSError as exc:
+            raise FileCommandParseError(f"Failed to read anchor file: {path}: {exc}") from exc
+        if text.strip() == "":
+            raise FileCommandParseError("Anchor text loaded from file must not be empty")
+        return text
+
+    assert namespace.anchor is not None
+    if namespace.anchor.strip() == "":
+        raise FileCommandParseError("--anchor requires non-empty text", usage=usage)
+    return namespace.anchor
+
+
 def _validate_arguments(
     operation: str,
     line: int | None,
@@ -578,6 +691,11 @@ def _validate_arguments(
     use_regex: bool,
     ignore_case: bool,
     max_replacements: int | None,
+    anchor_text: str | None,
+    anchor_use_regex: bool,
+    anchor_ignore_case: bool,
+    anchor_after: bool,
+    anchor_occurrence: int | None,
 ) -> None:
     """Validate operation-specific requirements."""
 
@@ -588,11 +706,48 @@ def _validate_arguments(
         # here prematurely.
         return
 
+    anchor_arguments_used = any(
+        [
+            anchor_text is not None,
+            anchor_use_regex,
+            anchor_ignore_case,
+            anchor_after,
+            anchor_occurrence is not None,
+        ]
+    )
+
+    if anchor_arguments_used and operation != "insert":
+        raise FileCommandParseError(
+            "Anchor options are only valid for the insert operation",
+        )
+
+    if anchor_occurrence is not None and anchor_occurrence <= 0:
+        raise FileCommandParseError("--anchor-occurrence must be greater than zero")
+
     if line is not None:
         if line <= 0:
             raise FileCommandParseError("--line must be a positive integer")
         if operation != "insert":
             raise FileCommandParseError("--line is only valid for the insert operation")
+
+    if operation == "insert":
+        if anchor_text is not None and line is not None:
+            raise FileCommandParseError(
+                "Insert accepts either --line or anchor arguments, not both",
+            )
+        if anchor_text is None and (
+            anchor_use_regex
+            or anchor_ignore_case
+            or anchor_after
+            or anchor_occurrence is not None
+        ):
+            raise FileCommandParseError(
+                "Anchor modifiers require --anchor or --anchor-from-file",
+            )
+        if anchor_text is None and line is None:
+            raise FileCommandParseError(
+                "Insert requires either --line or anchor arguments",
+            )
 
     if start_line is not None:
         if start_line <= 0:

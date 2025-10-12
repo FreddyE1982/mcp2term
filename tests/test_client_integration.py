@@ -441,6 +441,24 @@ def test_manage_file_command_executes_remote_operations(
             assert not errors
             assert any("Line" in line for line in outputs)
 
+            outputs.clear()
+            errors.clear()
+            anchor_insert_status = processor.execute(
+                f"filetool insert {relative_path} --content 'epsilon\\\\n' --anchor alpha --anchor-after"
+            )
+            assert anchor_insert_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert any("Inserted" in line for line in outputs)
+
+            outputs.clear()
+            errors.clear()
+            anchor_print_status = processor.execute(f"filetool print {relative_path}")
+            assert anchor_print_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert any("epsilon" in line for line in outputs)
+
             patch_payload = (
                 f"--- a/{relative_path}\n"
                 f"+++ b/{relative_path}\n"

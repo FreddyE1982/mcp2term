@@ -72,6 +72,8 @@ def test_file_editor_insert_replace_and_delete(tmp_path: Path, use_real_dependen
     )
     assert insert_result.message == "Inserted 2 line(s) at 2"
     assert "inserted-one" in insert_result.content
+    assert insert_result.metadata is not None
+    assert insert_result.metadata.get("resolved_insertion_line") == 2
 
     replace_result = editor.replace_range(
         "story.txt",
@@ -92,6 +94,97 @@ def test_file_editor_insert_replace_and_delete(tmp_path: Path, use_real_dependen
     assert delete_result.message == "Deleted lines 4-4"
     final_lines = (base_dir / "story.txt").read_text(encoding="utf-8").splitlines()
     assert final_lines == ["alpha", "inserted-one", "updated-middle"]
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_file_editor_insert_with_anchor(tmp_path: Path, use_real_dependencies: bool) -> None:
+    base_dir = tmp_path if use_real_dependencies else tmp_path
+    editor = FileEditor(base_dir)
+
+    editor.create_file(
+        "anchor.txt",
+        text="alpha\nbeta\ngamma\nbeta\n",
+        overwrite=False,
+        create_parents=False,
+        encoding="utf-8",
+    )
+
+    anchored_result = editor.insert_lines_at_anchor(
+        "anchor.txt",
+        anchor_text="beta",
+        text="delta\n",
+        encoding="utf-8",
+        after=True,
+        occurrence=2,
+        use_regex=False,
+        ignore_case=False,
+    )
+
+    assert anchored_result.success is True
+    assert "delta" in (anchored_result.content or "")
+    assert anchored_result.metadata is not None
+    assert anchored_result.metadata.get("anchor_occurrence") == 2
+    assert anchored_result.metadata.get("anchor_after") is True
+    assert anchored_result.metadata.get("anchor_start_line") == 4
+    assert anchored_result.metadata.get("resolved_insertion_line") == 5
+
+    regex_result = editor.insert_lines_at_anchor(
+        "anchor.txt",
+        anchor_text=r"^alp.*$",
+        text="preface\n",
+        encoding="utf-8",
+        after=False,
+        occurrence=1,
+        use_regex=True,
+        ignore_case=True,
+    )
+
+    assert regex_result.message.startswith("Inserted 1 line(s)")
+    assert regex_result.metadata is not None
+    assert regex_result.metadata.get("anchor_use_regex") is True
+    file_lines = (base_dir / "anchor.txt").read_text(encoding="utf-8").splitlines()
+    assert file_lines[0] == "preface"
+    assert "delta" in file_lines
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_file_editor_insert_with_anchor_failures(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    base_dir = tmp_path if use_real_dependencies else tmp_path
+    editor = FileEditor(base_dir)
+
+    editor.create_file(
+        "failure.txt",
+        text="one\ntwo\nthree\n",
+        overwrite=False,
+        create_parents=False,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileOperationError):
+        editor.insert_lines_at_anchor(
+            "failure.txt",
+            anchor_text="missing",
+            text="noop\n",
+            encoding="utf-8",
+            after=False,
+            occurrence=1,
+            use_regex=False,
+            ignore_case=False,
+        )
+
+    with pytest.raises(FileOperationError):
+        editor.insert_lines_at_anchor(
+            "failure.txt",
+            anchor_text=r"(two)",
+            text="noop\n",
+            encoding="utf-8",
+            after=False,
+            occurrence=2,
+            use_regex=True,
+            ignore_case=False,
+        )
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])

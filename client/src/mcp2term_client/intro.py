@@ -139,7 +139,7 @@ def _default_intro_section_provider(context: IntroContext) -> Iterable[IntroSect
         "`create` makes a brand new file; combine with `--create-parents` or `--overwrite` as needed.",
         "`write` replaces the entire file contents, and `append` safely extends the end of a file.",
         "`prepend` places text at the very start of a file and honours `--create-if-missing` for brand new documents.",
-        "`insert --line N` adds new text before the specified line, while `replace`/`delete` operate over line ranges via `--start-line` and `--end-line`.",
+        "`insert --line N` adds new text before the specified line, or combine `--anchor`, `--anchor-after`, and `--anchor-occurrence` to target literal or regex matches precisely while `replace`/`delete` operate over line ranges via `--start-line` and `--end-line`.",
         "`print` streams selected line ranges back to the terminal, perfect for quick inspections without an editor.",
         "`locate --content \"needle\"` returns the remote line numbers that match your search text for faster navigation.",
         "`patch --stdin` or `--content-from-file` applies unified diffs just like the automation-friendly `apply_patch` helper.",

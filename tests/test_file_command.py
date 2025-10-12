@@ -282,6 +282,89 @@ def test_parse_manage_file_substitute_regex(tmp_path: Path, use_real_dependencie
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_insert_with_anchor(tmp_path: Path, use_real_dependencies: bool) -> None:
+    command = parse_manage_file_command(
+        [
+            "insert",
+            "story.txt",
+            "--content",
+            "new-line\n",
+            "--anchor",
+            "beta",
+            "--anchor-after",
+            "--anchor-occurrence",
+            "2",
+        ]
+    )
+    assert command.operation == "insert"
+    assert command.anchor_text == "beta"
+    assert command.anchor_after is True
+    assert command.anchor_occurrence == 2
+    assert command.line is None
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_insert_anchor_regex(tmp_path: Path, use_real_dependencies: bool) -> None:
+    command = parse_manage_file_command(
+        [
+            "insert",
+            "story.txt",
+            "--content",
+            "new-line\n",
+            "--anchor",
+            r"^alpha$",
+            "--anchor-regex",
+            "--anchor-ignore-case",
+        ]
+    )
+    assert command.anchor_use_regex is True
+    assert command.anchor_ignore_case is True
+    assert command.anchor_occurrence == 1
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_parse_manage_file_insert_anchor_validation(
+    tmp_path: Path, use_real_dependencies: bool
+) -> None:
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "insert",
+                "story.txt",
+                "--content",
+                "value",
+                "--line",
+                "2",
+                "--anchor",
+                "beta",
+            ]
+        )
+
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "insert",
+                "story.txt",
+                "--content",
+                "value",
+                "--anchor-occurrence",
+                "0",
+            ]
+        )
+
+    with pytest.raises(FileCommandParseError):
+        parse_manage_file_command(
+            [
+                "insert",
+                "story.txt",
+                "--content",
+                "value",
+                "--anchor-after",
+            ]
+        )
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
 def test_parse_manage_file_substitute_rejects_invalid_usage(
     tmp_path: Path, use_real_dependencies: bool
 ) -> None:

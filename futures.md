@@ -92,3 +92,7 @@
 ## Substitution preview mode
 - **Purpose:** Allow operators to verify `substitute` results without mutating files, providing confidence before large-scale replacements.
 - **Usage:** Introduce a `--dry-run` flag that reports match counts, diff excerpts, and regex group expansions while leaving the file untouched. The server would reuse the existing substitution engine but skip writes, returning detailed metadata for auditing tools and interactive confirmation prompts.
+
+## Anchor-aware range edits
+- **Purpose:** Extend anchor-driven workflows beyond insertion so teams can replace or delete sections relative to literal or regex sentinels without manually calculating line numbers.
+- **Usage:** Build on the new anchor matching engine to allow `replace` and `delete` operations to target anchors, optionally spanning multiple matches, while preserving the existing line-based interface for compatibility.

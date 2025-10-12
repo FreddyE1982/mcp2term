@@ -326,6 +326,13 @@ class FileEditor:
             encoding=encoding,
             trailing_newline=trailing_newline or insert_trailing,
         )
+        metadata: dict[str, Any] | None = None
+        if insert_lines:
+            inserted_numbers = tuple(range(line, line + len(insert_lines)))
+            metadata = {
+                "resolved_insertion_line": line,
+                "inserted_line_numbers": inserted_numbers,
+            }
         return FileOperationResult(
             path=self.resolve_path(raw_path),
             operation="insert",
@@ -335,6 +342,161 @@ class FileEditor:
             message=f"Inserted {len(insert_lines)} line(s) at {line}",
             content="\n".join(lines),
             escape_profile=escape_profile,
+            metadata=metadata,
+        )
+
+    def insert_lines_at_anchor(
+        self,
+        raw_path: str,
+        *,
+        anchor_text: str,
+        text: str,
+        encoding: str,
+        after: bool,
+        occurrence: int,
+        use_regex: bool,
+        ignore_case: bool,
+        escape_profile: str | None = None,
+    ) -> FileOperationResult:
+        """Insert ``text`` relative to the located ``anchor_text`` within ``raw_path``.
+
+        Parameters
+        ----------
+        raw_path:
+            Target file path to modify.
+        anchor_text:
+            Literal or regular-expression anchor used to select the insertion point.
+        text:
+            Content to insert at the resolved location.
+        encoding:
+            Text encoding used when reading and writing the file.
+        after:
+            When ``True`` the new text is written after the matched anchor region,
+            otherwise it is placed immediately before it.
+        occurrence:
+            One-based index specifying which matching anchor occurrence should be
+            used.
+        use_regex:
+            When ``True`` interpret ``anchor_text`` as a Python regular
+            expression.
+        ignore_case:
+            Perform case-insensitive matching when ``True`` for both literal and
+            regular-expression anchors.
+        escape_profile:
+            Escape profile identifier propagated to the resulting operation
+            metadata for observability.
+        """
+
+        if not anchor_text:
+            raise FileOperationError("Anchor text must not be empty")
+
+        if occurrence <= 0:
+            raise FileOperationError("Anchor occurrence must be greater than zero")
+
+        lines, trailing_newline = self._load_lines(raw_path, encoding=encoding)
+        if not lines:
+            raise FileOperationError("Cannot anchor insert into an empty file")
+
+        search_text = "\n".join(lines)
+        if trailing_newline:
+            search_text += "\n"
+
+        matches: list[tuple[int, int]] = []
+
+        if use_regex:
+            flags = re.MULTILINE
+            if ignore_case:
+                flags |= re.IGNORECASE
+            try:
+                pattern = re.compile(anchor_text, flags)
+            except re.error as exc:
+                raise FileOperationError(f"Invalid anchor regular expression: {exc}") from exc
+            for match in pattern.finditer(search_text):
+                if match.end() == match.start():
+                    raise FileOperationError(
+                        "Anchor regular expression produced an empty match; adjust the pattern",
+                    )
+                match_start = match.start()
+                match_end = match.end()
+                start_line_index = search_text[:match_start].count("\n")
+                matched_text = search_text[match_start:match_end]
+                line_span = matched_text.count("\n")
+                end_line_index = start_line_index + line_span
+                matches.append((start_line_index, end_line_index))
+        else:
+            haystack = search_text.lower() if ignore_case else search_text
+            needle = anchor_text.lower() if ignore_case else anchor_text
+            index = haystack.find(needle)
+            while index != -1:
+                match_start = index
+                match_end = index + len(anchor_text)
+                start_line_index = search_text[:match_start].count("\n")
+                matched_text = search_text[match_start:match_end]
+                if not matched_text:
+                    raise FileOperationError("Anchor text must not be empty")
+                line_span = matched_text.count("\n")
+                end_line_index = start_line_index + line_span
+                matches.append((start_line_index, end_line_index))
+                index = haystack.find(needle, match_start + 1)
+
+        if not matches:
+            raise FileOperationError("Anchor text not found in target file")
+
+        if occurrence > len(matches):
+            raise FileOperationError(
+                f"Anchor occurrence {occurrence} exceeds available matches ({len(matches)})",
+            )
+
+        selected_index = occurrence - 1
+        start_line_index, end_line_index = matches[selected_index]
+        insertion_index = end_line_index + 1 if after else start_line_index
+
+        if insertion_index < 0 or insertion_index > len(lines):
+            raise FileOperationError("Resolved insertion point is out of range")
+
+        insert_lines, insert_trailing = self._split_lines(text)
+        lines[insertion_index:insertion_index] = insert_lines
+
+        self._write_lines(
+            raw_path,
+            lines,
+            encoding=encoding,
+            trailing_newline=trailing_newline or insert_trailing,
+        )
+
+        anchor_line_numbers = tuple(range(start_line_index + 1, end_line_index + 2))
+        inserted_line_numbers = tuple(
+            range(insertion_index + 1, insertion_index + len(insert_lines) + 1)
+        )
+        qualifier = "after" if after else "before"
+        descriptor = (
+            f"Inserted {len(insert_lines)} line(s) {qualifier} anchor starting at line {start_line_index + 1}"
+        )
+
+        metadata: dict[str, Any] = {
+            "anchor": anchor_text,
+            "anchor_use_regex": use_regex,
+            "anchor_ignore_case": ignore_case,
+            "anchor_after": after,
+            "anchor_occurrence": occurrence,
+            "anchor_start_line": start_line_index + 1,
+            "anchor_end_line": end_line_index + 1,
+            "anchor_line_numbers": anchor_line_numbers,
+            "resolved_insertion_line": insertion_index + 1,
+        }
+        if inserted_line_numbers:
+            metadata["inserted_line_numbers"] = inserted_line_numbers
+
+        return FileOperationResult(
+            path=self.resolve_path(raw_path),
+            operation="insert",
+            success=True,
+            changed=True,
+            encoding=encoding,
+            message=descriptor,
+            content="\n".join(lines),
+            escape_profile=escape_profile,
+            metadata=metadata,
         )
 
     def replace_range(

@@ -609,6 +609,11 @@ class RemoteMcpSession:
         use_regex: bool = False,
         ignore_case: bool = False,
         max_replacements: int | None = None,
+        anchor_text: str | None = None,
+        anchor_use_regex: bool = False,
+        anchor_ignore_case: bool = False,
+        anchor_after: bool = False,
+        anchor_occurrence: int | None = None,
     ) -> FileOperationResponse:
         try:
             response = self._submit_request(
@@ -629,6 +634,11 @@ class RemoteMcpSession:
                 use_regex=use_regex,
                 ignore_case=ignore_case,
                 max_replacements=max_replacements,
+                anchor_text=anchor_text,
+                anchor_use_regex=anchor_use_regex,
+                anchor_ignore_case=anchor_ignore_case,
+                anchor_after=anchor_after,
+                anchor_occurrence=anchor_occurrence,
             )
         except Exception as exc:
             self._emit_warning(
@@ -898,6 +908,11 @@ class RemoteMcpSession:
                             bool(request.payload.get("use_regex", False)),
                             bool(request.payload.get("ignore_case", False)),
                             request.payload.get("max_replacements"),
+                            request.payload.get("anchor_text"),
+                            bool(request.payload.get("anchor_use_regex", False)),
+                            bool(request.payload.get("anchor_ignore_case", False)),
+                            bool(request.payload.get("anchor_after", False)),
+                            request.payload.get("anchor_occurrence"),
                         )
                         request.future.set_result(result)
                         self._emit_warnings(result.warnings)
@@ -1039,6 +1054,11 @@ class RemoteMcpSession:
         use_regex: bool,
         ignore_case: bool,
         max_replacements: int | None,
+        anchor_text: str | None,
+        anchor_use_regex: bool,
+        anchor_ignore_case: bool,
+        anchor_after: bool,
+        anchor_occurrence: int | None,
     ) -> FileOperationResponse:
         if self._session is None:
             raise RuntimeError("RemoteMcpSession used before start()")
@@ -1066,6 +1086,17 @@ class RemoteMcpSession:
             arguments["end_line"] = end_line
         if max_replacements is not None:
             arguments["max_replacements"] = max_replacements
+        if anchor_text is not None:
+            arguments["anchor"] = anchor_text
+            arguments["anchor_use_regex"] = anchor_use_regex
+            arguments["anchor_ignore_case"] = anchor_ignore_case
+            arguments["anchor_after"] = anchor_after
+            if anchor_occurrence is not None:
+                arguments["anchor_occurrence"] = anchor_occurrence
+        elif anchor_after or anchor_use_regex or anchor_ignore_case or anchor_occurrence is not None:
+            raise ValueError(
+                "Anchor modifiers cannot be supplied without anchor text."
+            )
         result = await self._session.call_tool("manage_file", arguments)
         return FileOperationResponse.from_call_tool_result(result)
 
