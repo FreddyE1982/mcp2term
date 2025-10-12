@@ -196,6 +196,11 @@ class RemoteCommandProcessor:
                 use_regex=command.use_regex,
                 ignore_case=command.ignore_case,
                 max_replacements=command.max_replacements,
+                anchor_text=command.anchor_text,
+                anchor_use_regex=command.anchor_use_regex,
+                anchor_ignore_case=command.anchor_ignore_case,
+                anchor_after=command.anchor_after,
+                anchor_occurrence=command.anchor_occurrence,
             )
         except Exception as exc:
             self.error_writer(f"filetool: {exc}")
