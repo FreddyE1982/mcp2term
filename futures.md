@@ -96,3 +96,13 @@
 ## Anchor-aware range edits
 - **Purpose:** Extend anchor-driven workflows beyond insertion so teams can replace or delete sections relative to literal or regex sentinels without manually calculating line numbers.
 - **Usage:** Build on the new anchor matching engine to allow `replace` and `delete` operations to target anchors, optionally spanning multiple matches, while preserving the existing line-based interface for compatibility.
+
+## Configurable Python path exports
+- **Purpose:** Allow operators to append additional directories or opt out of the
+  automatic launch-directory export when integrating with virtual environments
+  or workspace managers that maintain their own module search paths.
+- **Usage:** Extend `ServerConfig` with an export policy structure that can add,
+  remove, or prioritise directories before the launch directory is injected.
+  Provide CLI switches and environment variables so deployments can describe the
+  desired ordering while keeping the launch-directory guarantee available as the
+  default behaviour.

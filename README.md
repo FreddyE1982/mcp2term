@@ -13,6 +13,9 @@ An implementation of a Model Context Protocol (MCP) server that grants safe, aud
 - **Typed lifespan context** shared with MCP tools for dependency access and lifecycle management.
 - **Structured tool responses** including timing information to make results easy for agents to consume.
 - **Console mirroring** so operators always see the command stream, stdout, and stderr on the hosting terminal by default.
+- **Automatic launch-directory export** that prepends the directory the server
+  was started from to ``PYTHONPATH`` so Python tooling invoked through
+  ``run_command`` can immediately resolve local packages.
 
 ## Installation
 
@@ -190,3 +193,8 @@ Control the integration with the following environment variables:
 | `MCP2TERM_NGROK_HOSTNAME` / `MCP2TERM_NGROK_DOMAIN` / `MCP2TERM_NGROK_EDGE` | Custom host bindings to request from ngrok. | `alpaca-model-easily.ngrok-free.app` for domain |
 
 Use the `--disable-ngrok` flag when running `mcp2term` to opt out of tunneling for a single invocation.
+The configuration also records the directory where the server process was
+launched and exports it to ``PYTHONPATH``. This mirrors running
+``export PYTHONPATH=$(pwd)`` before starting the server so that any Python code
+executed via ``run_command`` inherits the same module search path even when the
+working directory is overridden.

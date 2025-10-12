@@ -1,5 +1,6 @@
 """Tests for configuration parsing, including ngrok settings."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -72,3 +73,25 @@ def test_console_echo_toggle(use_real_dependencies: bool) -> None:
     assert enabled.console_echo is True
     with pytest.raises(ValueError):
         ServerConfig.from_env({"MCP2TERM_CONSOLE_ECHO": "maybe"})
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_build_environment_exports_launch_directory(use_real_dependencies: bool) -> None:
+    config = ServerConfig(inherit_environment=False)
+    env = config.build_environment()
+    assert env["PYTHONPATH"] == str(config.launch_directory)
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_build_environment_preserves_existing_pythonpath(use_real_dependencies: bool) -> None:
+    config = ServerConfig(inherit_environment=False)
+    original_pythonpath = os.pathsep.join([
+        "/tmp/demo-one",
+        str(config.launch_directory),
+        "/tmp/demo-two",
+    ])
+    config.additional_environment["PYTHONPATH"] = original_pythonpath
+    env = config.build_environment()
+    expected_entries = [str(config.launch_directory), "/tmp/demo-one", "/tmp/demo-two"]
+    assert env["PYTHONPATH"].split(os.pathsep) == expected_entries
+    assert config.additional_environment["PYTHONPATH"] == original_pythonpath

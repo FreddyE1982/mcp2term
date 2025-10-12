@@ -1,6 +1,9 @@
 """Tests for the shell command executor."""
 
 import asyncio
+import os
+import shlex
+import sys
 
 import pytest
 
@@ -170,3 +173,20 @@ def test_shell_executor_streams_stdin(use_real_dependencies: bool) -> None:
 
     result = asyncio.run(run_with_input())
     assert "interactive input" in result.stdout
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_shell_executor_exports_pythonpath(use_real_dependencies: bool) -> None:
+    config = ServerConfig(inherit_environment=False)
+    manager = PluginManager()
+    manager.refresh_exports()
+    executor = ShellCommandExecutor(config, manager)
+
+    interpreter = shlex.quote(sys.executable)
+    command = f"{interpreter} -c \"import os; print(os.environ.get('PYTHONPATH', ''))\""
+    result = asyncio.run(executor.run(command))
+    assert result.return_code == 0
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines, "Expected command to produce PYTHONPATH output"
+    pythonpath_value = lines[-1].strip()
+    assert pythonpath_value == str(config.launch_directory)
