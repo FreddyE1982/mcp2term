@@ -2,35 +2,32 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import os
-import secrets
+import select
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 import weakref
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from multiprocessing.connection import Connection, Listener
 from types import MappingProxyType
 from typing import Any
 
 import anyio
-from anyio.abc import TaskGroup as AnyIOTaskGroup
+from anyio import BrokenResourceError, ClosedResourceError, EndOfStream, get_cancelled_exc_class
+from anyio.abc import ObjectReceiveStream, ObjectSendStream, TaskGroup as AnyIOTaskGroup
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
-from .chat_bridge import (
-    ChatBridgeEnvelope,
-    ENVELOPE_KIND_APPEND,
-    ENVELOPE_KIND_MESSAGE,
-    ENVELOPE_KIND_STOP,
-)
 from .config import ServerConfig
 from .files import FileEditor, FileOperationError, FileOperationResult
 from .plugin import (
@@ -41,6 +38,13 @@ from .plugin import (
 )
 from .shell import CommandExecutionError, CommandResult, CommandTimeoutError, ShellCommandExecutor
 from .streaming import CommandCompleteEvent, utcnow
+
+try:  # pragma: no cover - Windows environments do not provide termios/tty
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - handled at runtime for Windows
+    termios = None  # type: ignore[assignment]
+    tty = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
@@ -191,41 +195,49 @@ class ApplicationState:
 
 
 class UserChatBridge:
-    """Coordinate the auxiliary terminal console for server-side messaging.
+    """Coordinate interactive console messaging without auxiliary terminals.
 
-    The bridge spawns a new terminal window hosting :mod:`mcp2term.chat_terminal`
-    so administrators can broadcast messages to every connected MCP client. The
-    helper process communicates with the main server via a
-    :class:`multiprocessing.connection.Listener` socket, ensuring that messages
-    travel through the same ordering guarantees as command output without
-    resorting to GUI toolkits.
+    When active the bridge listens to the hosting console for the activation
+    key ``/``. Once triggered it temporarily pauses console echoing so that
+    command output does not interleave with the operator's message. The typed
+    text is echoed locally and, after pressing :kbd:`Enter`, broadcast to every
+    connected MCP client as an informational log entry. Pressing :kbd:`Esc`
+    cancels the interaction without sending anything to clients.
     """
 
-    _MESSAGE_PREFIX = "[MESSAGE FROM USER. DO NOT IGNORE:]"
-    _HISTORY_HEADER = "[delivered]"
+    _MESSAGE_PREFIX = "[MESSAGE FROM USER. DO NOT IGNORE!]"
+    _ACTIVATION_KEY = "/"
+    _DISABLE_VALUES = {"disable", "disabled", "off", "none", "false", "0"}
+    _PROMPT = "[Operator ➜ Clients] Enter message (Esc to cancel): "
+    _CANCEL_NOTICE = "[Operator message cancelled]"
+    _EMPTY_NOTICE = "[Operator message ignored: no text entered]"
+    _READ_TIMEOUT = 0.05
+    _MAX_PENDING_MESSAGES = 64
 
-    def __init__(
-        self,
-        *,
-        plugin_manager: PluginManager,
-        console_echo: bool,
-        terminal_launcher: SystemTerminalLauncher | None = None,
-    ) -> None:
+    def __init__(self, *, plugin_manager: PluginManager, console_echo: bool) -> None:
+        """Initialise the bridge with references to the plugin manager."""
+
         self._plugin_manager = plugin_manager
         self._console_echo = console_echo
-        self._terminal_launcher = terminal_launcher or SystemTerminalLauncher()
         self._sessions: weakref.WeakSet[ServerSession] = weakref.WeakSet()
         self._task_group: AnyIOTaskGroup | None = None
         self._active = False
-        self._pump_cancel_scope: anyio.CancelScope | None = None
-        self._listener: Listener | None = None
-        self._auth_key: bytes | None = None
-        self._connection: Connection | None = None
-        self._terminal_process: subprocess.Popen[str] | None = None
+        self._message_sender: ObjectSendStream[str] | None = None
+        self._message_receiver: ObjectReceiveStream[str] | None = None
+        self._stop_event = threading.Event()
+        self._stdin = sys.stdin
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        self._stdin_fd = self._determine_stdin_fd()
+        self._terminal_settings: list[Any] | None = None
+        self._interactive = False
+        self._console_lock = threading.RLock()
+        self._input_lock = threading.Lock()
+        self._console_paused = False
 
     @property
     def is_active(self) -> bool:
-        """Return ``True`` when the chat bridge successfully started."""
+        """Return ``True`` when console-based messaging is operational."""
 
         return self._active
 
@@ -243,163 +255,315 @@ class UserChatBridge:
         self._sessions.add(session)
 
     async def __aenter__(self) -> "UserChatBridge":
-        """Start background tasks and spawn the terminal console when possible."""
+        """Activate the console listener when interactive input is available."""
 
-        try:
-            plan, address = self._prepare_launch_plan()
-        except Exception as exc:  # pragma: no cover - defensive startup logging
-            logger.warning("User chat bridge inactive: %s", exc)
-            self._cleanup_listener()
+        if self._should_disable_from_environment():
+            logger.info("User chat bridge inactive: disabled via MCP2TERM_CHAT_TERMINAL.")
             self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
             return self
 
-        if plan is None:
-            logger.info("User chat bridge inactive: no compatible terminal command detected.")
-            self._cleanup_listener()
+        if not self._stdin_supports_interaction():
+            logger.info("User chat bridge inactive: standard input is not a TTY.")
+            self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
+            return self
+
+        try:
+            self._initialise_console_mode()
+        except Exception as exc:  # pragma: no cover - environment specific
+            logger.warning(
+                "User chat bridge inactive: unable to configure console for interactive messaging: %s",
+                exc,
+            )
+            self._restore_console_mode()
             self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
             return self
 
         self._task_group = await anyio.create_task_group().__aenter__()
+        send_stream, receive_stream = anyio.create_memory_object_stream[str](self._MAX_PENDING_MESSAGES)
+        self._message_sender = send_stream
+        self._message_receiver = receive_stream
+        self._interactive = True
         try:
-            self._task_group.start_soon(self._run_listener)
-            self._terminal_process = self._terminal_launcher.launch(plan)
+            self._task_group.start_soon(self._consume_messages)
+            self._task_group.start_soon(self._monitor_console)
         except Exception:
             await self._shutdown_tasks()
             raise
-        else:
-            self._active = True
-            self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
-            logger.info(
-                "User chat bridge initialised with terminal console bound to %s:%s.",
-                address[0],
-                address[1],
-            )
+
+        self._active = True
+        self._plugin_manager.register_export("mcp2term.user_chat.bridge", self)
+        logger.info(
+            "User chat bridge initialised: press '%s' then type a message to reach all clients.",
+            self._ACTIVATION_KEY,
+        )
         return self
 
     async def __aexit__(self, exc_type, exc, exc_tb) -> None:
-        """Shut down the terminal console and background listener."""
+        """Shut down the console listener and restore terminal state."""
 
         await self._shutdown_tasks()
 
     async def _shutdown_tasks(self) -> None:
-        """Terminate all background resources owned by the bridge."""
+        """Terminate background activities and clear registered exports."""
 
-        if self._pump_cancel_scope is not None:
-            self._pump_cancel_scope.cancel()
+        self._stop_event.set()
 
-        await self._send_control_envelope(ChatBridgeEnvelope(kind=ENVELOPE_KIND_STOP))
+        if self._message_sender is not None:
+            with suppress(Exception):
+                self._message_sender.close()
+        if self._message_receiver is not None:
+            with suppress(Exception):
+                self._message_receiver.close()
 
         if self._task_group is not None:
             await self._task_group.__aexit__(None, None, None)
             self._task_group = None
 
-        if self._terminal_process is not None:
-            self._terminal_launcher.terminate(self._terminal_process)
-            self._terminal_process = None
-
-        self._cleanup_listener()
-
+        self._restore_console_mode()
         self._plugin_manager.register_export("mcp2term.user_chat.bridge", None)
-        self._active = False
         self._sessions = weakref.WeakSet()
-        self._pump_cancel_scope = None
-        self._connection = None
-        self._auth_key = None
+        self._message_sender = None
+        self._message_receiver = None
+        self._active = False
+        self._interactive = False
+        self._console_paused = False
+        self._stop_event = threading.Event()
 
-    def _cleanup_listener(self) -> None:
-        """Close any open listener socket associated with the bridge."""
+    def _determine_stdin_fd(self) -> int | None:
+        """Return the file descriptor for ``stdin`` when available."""
 
-        if self._listener is not None:
-            try:
-                self._listener.close()
-            except Exception:  # pragma: no cover - listener already closed
-                logger.debug("Chat bridge listener already closed during cleanup")
-            self._listener = None
+        try:
+            return self._stdin.fileno()
+        except (AttributeError, io.UnsupportedOperation):
+            return None
 
-    def _prepare_launch_plan(self) -> tuple[TerminalLaunchPlan | None, tuple[str, int]]:
-        """Create the listener and compute the terminal launch plan."""
+    def _should_disable_from_environment(self) -> bool:
+        """Return ``True`` if the environment requests feature deactivation."""
 
-        self._auth_key = secrets.token_bytes(32)
-        self._listener = Listener(("127.0.0.1", 0), authkey=self._auth_key)
-        address = self._listener.address
-        if not isinstance(address, tuple) or len(address) != 2:
-            raise RuntimeError("Listener provided an unexpected address format")
-        host = str(address[0])
-        port = int(address[1])
-        script_invocation = [
-            sys.executable,
-            "-m",
-            "mcp2term.chat_terminal",
-            "--address",
-            host,
-            "--port",
-            str(port),
-            "--auth-key",
-            self._auth_key.hex(),
-            "--history-header",
-            self._HISTORY_HEADER,
-        ]
-        plan = self._terminal_launcher.prepare_plan(script_invocation, title="mcp2term Chat Console")
-        return plan, (host, port)
+        override = os.environ.get("MCP2TERM_CHAT_TERMINAL")
+        if not override:
+            return False
+        return override.strip().lower() in self._DISABLE_VALUES
 
-    async def _run_listener(self) -> None:
-        """Accept connections from the auxiliary terminal and relay messages."""
+    def _stdin_supports_interaction(self) -> bool:
+        """Return ``True`` when ``stdin`` appears suitable for key capture."""
 
-        listener = self._listener
-        if listener is None:
+        if self._stdin_fd is None:
+            return False
+        try:
+            return bool(self._stdin.isatty())
+        except Exception:  # pragma: no cover - defensive guard
+            return False
+
+    def _initialise_console_mode(self) -> None:
+        """Enable character-at-a-time reading on POSIX terminals."""
+
+        if os.name == "nt":
+            return  # Windows uses ``msvcrt`` functions which do not require setup
+        if termios is None or tty is None:
+            raise RuntimeError("termios support not available; cannot enable interactive input")
+        if self._stdin_fd is None:
+            raise RuntimeError("stdin file descriptor unavailable")
+        self._terminal_settings = termios.tcgetattr(self._stdin_fd)
+        tty.setcbreak(self._stdin_fd)
+
+    def _restore_console_mode(self) -> None:
+        """Restore any console state modified during activation."""
+
+        if os.name == "nt":
             return
-        with anyio.CancelScope() as scope:
-            self._pump_cancel_scope = scope
-            try:
-                connection = await anyio.to_thread.run_sync(listener.accept)
-            except Exception:
-                logger.exception("User chat bridge failed to accept terminal connection")
-                return
-            finally:
-                try:
-                    listener.close()
-                except Exception:  # pragma: no cover - listener already closed
-                    logger.debug("Chat bridge listener already closed after accept")
-                self._listener = None
-
-            self._connection = connection
-            await self._send_control_envelope(
-                ChatBridgeEnvelope(kind=ENVELOPE_KIND_APPEND, payload="Chat console connected."),
-            )
-
-            while True:
-                try:
-                    envelope = await anyio.to_thread.run_sync(connection.recv)
-                except (EOFError, OSError):
-                    logger.info("Chat console disconnected; stopping listener loop")
-                    break
-                if not isinstance(envelope, ChatBridgeEnvelope):
-                    logger.debug("Ignoring unexpected payload from chat console: %r", envelope)
-                    continue
-                if envelope.kind == ENVELOPE_KIND_STOP:
-                    break
-                if envelope.kind == ENVELOPE_KIND_MESSAGE and envelope.payload:
-                    await self._broadcast_message(envelope.payload)
-
-            try:
-                connection.close()
-            except Exception:  # pragma: no cover - connection already closed
-                logger.debug("Chat console connection already closed during shutdown")
-
-            self._connection = None
-            self._active = False
-        self._pump_cancel_scope = None
-
-    async def _send_control_envelope(self, envelope: ChatBridgeEnvelope) -> None:
-        """Forward ``envelope`` to the terminal console if connected."""
-
-        connection = self._connection
-        if connection is None:
+        if self._stdin_fd is None:
+            return
+        if self._terminal_settings is None:
             return
         try:
-            await anyio.to_thread.run_sync(connection.send, envelope)
-        except (EOFError, OSError):
-            logger.debug("Unable to deliver control envelope to chat console")
+            termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._terminal_settings)
+        except Exception:  # pragma: no cover - defensive guard
+            logger.debug("Failed to restore terminal settings; continuing shutdown")
+        finally:
+            self._terminal_settings = None
+
+    async def _consume_messages(self) -> None:
+        """Relay queued messages to all connected sessions."""
+
+        receiver = self._message_receiver
+        if receiver is None:
+            return
+        try:
+            async with receiver:
+                async for message in receiver:
+                    await self._broadcast_message(message)
+        except EndOfStream:
+            return
+
+    async def _monitor_console(self) -> None:
+        """Capture messages typed via the activation key and queue them."""
+
+        send_stream = self._message_sender
+        if send_stream is None:
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                message = await anyio.to_thread.run_sync(
+                    self._wait_for_console_message,
+                    cancellable=True,
+                )
+            except get_cancelled_exc_class():
+                break
+
+            if message is None:
+                continue
+
+            try:
+                await send_stream.send(message)
+            except (BrokenResourceError, ClosedResourceError):
+                break
+
+        self._stop_event.set()
+
+    def _wait_for_console_message(self) -> str | None:
+        """Block until the activation key is pressed and a message is entered."""
+
+        while not self._stop_event.is_set():
+            key = self._read_key(timeout=self._READ_TIMEOUT)
+            if key is None:
+                continue
+            if key == self._ACTIVATION_KEY:
+                return self._capture_message()
+        return None
+
+    def _capture_message(self) -> str | None:
+        """Capture a full line of input from the operator."""
+
+        if not self._interactive:
+            return None
+        if not self._input_lock.acquire(blocking=False):
+            return None
+
+        try:
+            self._pause_console_echo()
+            with self._console_lock:
+                self._stdout.write("\n")
+                self._stdout.write(self._PROMPT)
+                self._stdout.flush()
+
+            buffer: list[str] = []
+            while not self._stop_event.is_set():
+                key = self._read_key(timeout=None)
+                if key is None:
+                    continue
+                if key in {"\r", "\n"}:
+                    with self._console_lock:
+                        self._stdout.write("\n")
+                        self._stdout.flush()
+                    message = "".join(buffer).strip()
+                    if not message:
+                        self._announce_to_console(self._EMPTY_NOTICE)
+                        return None
+                    self._announce_to_console("[Operator message queued for delivery]")
+                    return message
+                if key == "\x1b":
+                    self._announce_to_console(self._CANCEL_NOTICE)
+                    return None
+                if key in {"\x7f", "\b"}:
+                    if buffer:
+                        buffer.pop()
+                        with self._console_lock:
+                            self._stdout.write("\b \b")
+                            self._stdout.flush()
+                    continue
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if self._is_printable_character(key):
+                    buffer.append(key)
+                    with self._console_lock:
+                        self._stdout.write(key)
+                        self._stdout.flush()
+            return None
+        finally:
+            self._resume_console_echo()
+            self._input_lock.release()
+
+    def _is_printable_character(self, value: str) -> bool:
+        """Return ``True`` when ``value`` should be appended to the buffer."""
+
+        if value == "\t":
+            return False
+        return value.isprintable()
+
+    def _read_key(self, *, timeout: float | None) -> str | None:
+        """Return a single character from the console respecting ``timeout``."""
+
+        effective_timeout = self._READ_TIMEOUT if timeout is None else timeout
+        if os.name == "nt":
+            return self._read_key_windows(effective_timeout)
+        return self._read_key_posix(effective_timeout)
+
+    def _read_key_posix(self, timeout: float | None) -> str | None:
+        """Read one character from ``stdin`` using POSIX primitives."""
+
+        if self._stdin_fd is None:
+            return None
+        while not self._stop_event.is_set():
+            try:
+                ready, _, _ = select.select([self._stdin_fd], [], [], timeout)
+            except InterruptedError:
+                continue
+            if not ready:
+                return None
+            try:
+                data = os.read(self._stdin_fd, 1)
+            except OSError:
+                return None
+            if not data:
+                return None
+            try:
+                return data.decode("utf-8", errors="ignore")
+            except Exception:
+                return None
+        return None
+
+    def _read_key_windows(self, timeout: float) -> str | None:  # pragma: no cover - Windows specific
+        """Read a character using the Windows console APIs."""
+
+        import msvcrt
+
+        sleep_interval = min(timeout, self._READ_TIMEOUT)
+        deadline = time.monotonic() + timeout
+        while not self._stop_event.is_set():
+            if msvcrt.kbhit():
+                char = msvcrt.getwch()
+                return char
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(sleep_interval)
+        return None
+
+    def _pause_console_echo(self) -> None:
+        """Disable console echoing so streamed output does not interleave."""
+
+        if not self._console_echo:
+            return
+        if self._console_paused:
+            return
+        self._plugin_manager.set_console_echo_enabled(False)
+        self._console_paused = True
+
+    def _resume_console_echo(self) -> None:
+        """Re-enable console echoing if it was paused for message entry."""
+
+        if not self._console_paused:
+            return
+        self._plugin_manager.set_console_echo_enabled(True)
+        self._console_paused = False
+
+    def _announce_to_console(self, message: str) -> None:
+        """Write ``message`` to ``stdout`` with serialised locking."""
+
+        with self._console_lock:
+            self._stdout.write(message + "\n")
+            self._stdout.flush()
 
     async def _broadcast_message(self, message: str) -> None:
         """Send ``message`` to every connected session as a log entry."""
@@ -420,11 +584,7 @@ class UserChatBridge:
             failures,
             message,
         )
-        if self._console_echo:
-            print(formatted, flush=True)
-        await self._send_control_envelope(
-            ChatBridgeEnvelope(kind=ENVELOPE_KIND_APPEND, payload=formatted),
-        )
+        self._announce_to_console(formatted)
 
 
 

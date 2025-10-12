@@ -64,3 +64,11 @@
 ## Interactive chat status mirroring
 - **Purpose:** Surface delivery acknowledgements, failure diagnostics, and plugin-generated notices inside the terminal helper process so operators receive immediate visual feedback without consulting logs.
 - **Usage:** Expand the inter-process control channel to forward server-generated status messages using the existing append envelope. Add bridge hooks that format status updates, append them to the console history, and optionally highlight warnings or errors with colour-coded text for rapid operator assessment.
+
+## Console messaging hotkey profiles
+- **Purpose:** Allow deployments to customise the activation key, cancellation bindings, and prompt phrasing used by the console messaging bridge so that they align with internal runbooks or avoid clashing with terminal shortcuts.
+- **Usage:** Extend `ServerConfig` with a console messaging profile that defines the activation key, cancellation keys, and prompt text. The profile should be validated for cross-platform compatibility and exposed through the plugin registry so administrators can ship environment-specific presets.
+
+## Operator message policy hooks
+- **Purpose:** Enable security and compliance teams to approve, redact, or transform operator-sent messages before they reach clients, ensuring that sensitive guidance does not leak unintentionally.
+- **Usage:** Introduce a plugin hook fired immediately before `_broadcast_message` transmits to sessions. The hook should receive the raw message, the formatted prefix, and contextual metadata such as the timestamp and connected session count. Plugins can veto delivery, substitute content, append audit annotations, or trigger out-of-band notifications when policy rules are violated.
