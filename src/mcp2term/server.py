@@ -11,12 +11,12 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TextIO
 
 import anyio
 from anyio import BrokenResourceError, ClosedResourceError, EndOfStream, get_cancelled_exc_class
@@ -57,6 +57,128 @@ class ApplicationState:
     chat_bridge: "UserChatBridge"
 
 
+class ConsoleStreamProxy(io.TextIOBase):
+    """Thread-safe stream wrapper buffering output while console echoing is paused."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        underlying: TextIO,
+        lock: threading.RLock,
+    ) -> None:
+        self._name = name
+        self._underlying = underlying
+        self._lock = lock
+        self._buffer: list[str] = []
+        self._paused = False
+        self._encoding = getattr(underlying, "encoding", "utf-8")
+        self._errors = getattr(underlying, "errors", "strict")
+
+    @property
+    def name(self) -> str:
+        """Return the diagnostic label used for logging."""
+
+        return self._name
+
+    @property
+    def encoding(self) -> str:
+        """Return the encoding reported to downstream writers."""
+
+        return self._encoding
+
+    @property
+    def errors(self) -> str:
+        """Return the error handling mode reported to downstream writers."""
+
+        return self._errors
+
+    def writable(self) -> bool:  # pragma: no cover - trivial delegation
+        return True
+
+    def readable(self) -> bool:  # pragma: no cover - trivial delegation
+        return False
+
+    def seekable(self) -> bool:  # pragma: no cover - trivial delegation
+        return False
+
+    def isatty(self) -> bool:
+        """Return ``True`` when the underlying stream is a TTY."""
+
+        return bool(getattr(self._underlying, "isatty", lambda: False)())
+
+    def fileno(self) -> int:
+        """Return the file descriptor of the underlying stream."""
+
+        fileno_func = getattr(self._underlying, "fileno", None)
+        if fileno_func is None:
+            raise io.UnsupportedOperation("Underlying stream does not expose fileno()")
+        return int(fileno_func())
+
+    def flush(self) -> None:
+        """Flush any buffered output when not paused."""
+
+        with self._lock:
+            if self._paused:
+                return
+            self._underlying.flush()
+
+    def close(self) -> None:  # pragma: no cover - underlying streams stay open
+        """Flush buffered output without closing the underlying stream."""
+
+        with self._lock:
+            if self._buffer:
+                self._underlying.write("".join(self._buffer))
+                self._buffer.clear()
+            self._underlying.flush()
+
+    def detach(self) -> None:  # pragma: no cover - TextIOBase contract
+        raise io.UnsupportedOperation("ConsoleStreamProxy does not support detach()")
+
+    def write(self, data: str) -> int:
+        """Write ``data`` or buffer it when console echoing is paused."""
+
+        if not data:
+            return 0
+        if not isinstance(data, str):
+            data = str(data)
+        with self._lock:
+            if self._paused:
+                self._buffer.append(data)
+                return len(data)
+            written = self._underlying.write(data)
+            if written is None:
+                written = len(data)
+            self._underlying.flush()
+            return written
+
+    def writelines(self, lines: Iterable[str]) -> None:
+        """Write multiple ``lines`` while respecting the pause state."""
+
+        for line in lines:
+            self.write(line)
+
+    def set_paused(self, paused: bool) -> None:
+        """Toggle buffering and flush queued output upon resuming."""
+
+        with self._lock:
+            if self._paused == paused:
+                return
+            self._paused = paused
+            if not paused and self._buffer:
+                buffered = "".join(self._buffer)
+                self._buffer.clear()
+                self._underlying.write(buffered)
+                self._underlying.flush()
+
+    def is_paused(self) -> bool:
+        """Return ``True`` when the proxy currently buffers writes."""
+
+        return self._paused
+
+    def __getattr__(self, item: str) -> Any:  # pragma: no cover - delegation helper
+        return getattr(self._underlying, item)
+
 class UserChatBridge:
     """Coordinate interactive console messaging without auxiliary terminals.
 
@@ -89,8 +211,10 @@ class UserChatBridge:
         self._message_receiver: ObjectReceiveStream[str] | None = None
         self._stop_event = threading.Event()
         self._stdin = sys.stdin
-        self._stdout = sys.stdout
-        self._stderr = sys.stderr
+        self._stdout_base: TextIO = sys.stdout
+        self._stderr_base: TextIO = sys.stderr
+        self._stdout_proxy: ConsoleStreamProxy | None = None
+        self._stderr_proxy: ConsoleStreamProxy | None = None
         self._stdin_fd = self._determine_stdin_fd()
         self._terminal_settings: list[Any] | None = None
         self._interactive = False
@@ -146,6 +270,7 @@ class UserChatBridge:
         self._message_sender = send_stream
         self._message_receiver = receive_stream
         self._interactive = True
+        self._install_console_stream_proxies()
         try:
             self._task_group.start_soon(self._consume_messages)
             self._task_group.start_soon(self._monitor_console)
@@ -183,6 +308,7 @@ class UserChatBridge:
             self._task_group = None
 
         self._restore_console_mode()
+        self._remove_console_stream_proxies()
         self._plugin_manager.register_export("mcp2term.user_chat.bridge", None)
         self._sessions = weakref.WeakSet()
         self._message_sender = None
@@ -246,6 +372,42 @@ class UserChatBridge:
         finally:
             self._terminal_settings = None
 
+    def _install_console_stream_proxies(self) -> None:
+        """Replace ``sys.stdout`` and ``sys.stderr`` with pause-aware proxies."""
+
+        if self._stdout_proxy is not None or self._stderr_proxy is not None:
+            return
+        self._stdout_proxy = ConsoleStreamProxy(
+            name="stdout",
+            underlying=self._stdout_base,
+            lock=self._console_lock,
+        )
+        self._stderr_proxy = ConsoleStreamProxy(
+            name="stderr",
+            underlying=self._stderr_base,
+            lock=self._console_lock,
+        )
+        sys.stdout = self._stdout_proxy
+        sys.stderr = self._stderr_proxy
+        self._plugin_manager.update_console_echo_streams(
+            stdout=self._stdout_proxy,
+            stderr=self._stderr_proxy,
+        )
+
+    def _remove_console_stream_proxies(self) -> None:
+        """Restore the original console streams if proxies were installed."""
+
+        if self._stdout_proxy is not None and sys.stdout is self._stdout_proxy:
+            sys.stdout = self._stdout_base
+        if self._stderr_proxy is not None and sys.stderr is self._stderr_proxy:
+            sys.stderr = self._stderr_base
+        self._plugin_manager.update_console_echo_streams(
+            stdout=self._stdout_base,
+            stderr=self._stderr_base,
+        )
+        self._stdout_proxy = None
+        self._stderr_proxy = None
+
     async def _consume_messages(self) -> None:
         """Relay queued messages to all connected sessions."""
 
@@ -307,9 +469,9 @@ class UserChatBridge:
         try:
             self._pause_console_echo()
             with self._console_lock:
-                self._stdout.write("\n")
-                self._stdout.write(self._PROMPT)
-                self._stdout.flush()
+                self._stdout_base.write("\n")
+                self._stdout_base.write(self._PROMPT)
+                self._stdout_base.flush()
 
             buffer: list[str] = []
             while not self._stop_event.is_set():
@@ -318,8 +480,8 @@ class UserChatBridge:
                     continue
                 if key in {"\r", "\n"}:
                     with self._console_lock:
-                        self._stdout.write("\n")
-                        self._stdout.flush()
+                        self._stdout_base.write("\n")
+                        self._stdout_base.flush()
                     message = "".join(buffer).strip()
                     if not message:
                         self._announce_to_console(self._EMPTY_NOTICE)
@@ -333,16 +495,16 @@ class UserChatBridge:
                     if buffer:
                         buffer.pop()
                         with self._console_lock:
-                            self._stdout.write("\b \b")
-                            self._stdout.flush()
+                            self._stdout_base.write("\b \b")
+                            self._stdout_base.flush()
                     continue
                 if key == "\x03":
                     raise KeyboardInterrupt
                 if self._is_printable_character(key):
                     buffer.append(key)
                     with self._console_lock:
-                        self._stdout.write(key)
-                        self._stdout.flush()
+                        self._stdout_base.write(key)
+                        self._stdout_base.flush()
             return None
         finally:
             self._resume_console_echo()
@@ -406,11 +568,14 @@ class UserChatBridge:
     def _pause_console_echo(self) -> None:
         """Disable console echoing so streamed output does not interleave."""
 
-        if not self._console_echo:
-            return
         if self._console_paused:
             return
-        self._plugin_manager.set_console_echo_enabled(False)
+        if self._console_echo:
+            self._plugin_manager.set_console_echo_enabled(False)
+        if self._stdout_proxy is not None:
+            self._stdout_proxy.set_paused(True)
+        if self._stderr_proxy is not None:
+            self._stderr_proxy.set_paused(True)
         self._console_paused = True
 
     def _resume_console_echo(self) -> None:
@@ -418,15 +583,20 @@ class UserChatBridge:
 
         if not self._console_paused:
             return
-        self._plugin_manager.set_console_echo_enabled(True)
+        if self._stdout_proxy is not None:
+            self._stdout_proxy.set_paused(False)
+        if self._stderr_proxy is not None:
+            self._stderr_proxy.set_paused(False)
+        if self._console_echo:
+            self._plugin_manager.set_console_echo_enabled(True)
         self._console_paused = False
 
     def _announce_to_console(self, message: str) -> None:
         """Write ``message`` to ``stdout`` with serialised locking."""
 
         with self._console_lock:
-            self._stdout.write(message + "\n")
-            self._stdout.flush()
+            self._stdout_base.write(message + "\n")
+            self._stdout_base.flush()
 
     async def _broadcast_message(self, message: str) -> None:
         """Send ``message`` to every connected session as a log entry."""

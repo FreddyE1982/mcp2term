@@ -76,3 +76,7 @@
 ## Operator messaging command-line companion
 - **Purpose:** Provide a non-interactive utility that can inject operator messages into the running server now that the standalone terminal window has been retired.
 - **Usage:** Implement a small CLI entry point (for example `mcp2term-send-message`) that connects to the existing chat bridge transport, authenticates using short-lived tokens, and submits structured messages. The tool should support templated payloads, dry-run validation, and integration with automation systems so supervisors can broadcast scripted status updates without requiring physical access to the server console.
+
+## Console stream observability hooks
+- **Purpose:** Expose metrics and structured events from the new pause-aware console stream proxies so that monitoring systems can alert when output buffering persists or grows unexpectedly.
+- **Usage:** Introduce a registry of observers that receive callbacks whenever `ConsoleStreamProxy` transitions between paused and active states or flushes buffered output. Observers should record buffering duration, data volume, and caller metadata so operators can diagnose slow consumers or misbehaving plugins. Provide sample integrations for Prometheus and OpenTelemetry exporters.

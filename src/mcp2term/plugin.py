@@ -120,6 +120,20 @@ class ConsoleEchoListener(CommandStreamListener):
         stream.write(f"{self._prefix} {message}\n")
         stream.flush()
 
+    @property
+    def prefix(self) -> str:
+        """Return the prefix prepended to every mirrored log line."""
+
+        return self._prefix
+
+    def update_streams(self, *, stdout: TextIO | None = None, stderr: TextIO | None = None) -> None:
+        """Rebind the underlying output streams used for console mirroring."""
+
+        if stdout is not None:
+            self._stdout = stdout
+        if stderr is not None:
+            self._stderr = stderr
+
     async def on_command_start(self, event: CommandStartEvent) -> None:
         self._write_line(self._stdout, f"▶ {event.request.command}")
         self._write_line(
@@ -197,15 +211,27 @@ class PluginManager:
         default=None, init=False, repr=False
     )
     _export_packages: set[str] = field(default_factory=set, init=False, repr=False)
+    _console_stdout: TextIO = field(init=False, repr=False)
+    _console_stderr: TextIO = field(init=False, repr=False)
+    _console_prefix: str = field(default="[mcp2term]", init=False, repr=False)
+    _console_echo_enabled: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self._console_stdout = sys.stdout
+        self._console_stderr = sys.stderr
         self._initialize_export_packages()
         self._ensure_console_echo_listener()
 
     def _ensure_console_echo_listener(self) -> None:
         if self._console_echo_listener is not None:
             return
-        listener = ConsoleEchoListener()
+        if not self._console_echo_enabled:
+            return
+        listener = ConsoleEchoListener(
+            stdout=self._console_stdout,
+            stderr=self._console_stderr,
+            prefix=self._console_prefix,
+        )
         self.command_listeners.append(listener)
         self._console_echo_listener = listener
 
@@ -235,19 +261,43 @@ class PluginManager:
         """Enable or disable mirroring command activity to the local console."""
 
         if enabled:
+            self._console_echo_enabled = True
             if self._console_echo_listener is None:
-                listener = ConsoleEchoListener()
+                listener = ConsoleEchoListener(
+                    stdout=self._console_stdout,
+                    stderr=self._console_stderr,
+                    prefix=self._console_prefix,
+                )
                 self.command_listeners.append(listener)
                 self._console_echo_listener = listener
             return
 
         if self._console_echo_listener is None:
+            self._console_echo_enabled = False
             return
         try:
             self.command_listeners.remove(self._console_echo_listener)
         except ValueError:  # pragma: no cover - defensive guard
             pass
         self._console_echo_listener = None
+        self._console_echo_enabled = False
+
+    def update_console_echo_streams(self, *, stdout: TextIO, stderr: TextIO) -> None:
+        """Update the streams used for console mirroring without toggling state."""
+
+        self._console_stdout = stdout
+        self._console_stderr = stderr
+        listener = self._console_echo_listener
+        if listener is not None:
+            listener.update_streams(stdout=stdout, stderr=stderr)
+        elif self._console_echo_enabled:
+            listener = ConsoleEchoListener(
+                stdout=stdout,
+                stderr=stderr,
+                prefix=self._console_prefix,
+            )
+            self.command_listeners.append(listener)
+            self._console_echo_listener = listener
 
     def refresh_exports(self) -> None:
         """Refresh exported symbols from loaded mcp2term modules."""
