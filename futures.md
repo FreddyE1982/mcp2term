@@ -84,3 +84,7 @@
 ## Warning delivery health monitoring
 - **Purpose:** Detect when client-side warning sinks repeatedly fail so operators can proactively repair integrations before users lose critical diagnostics.
 - **Usage:** Track notice-writer failures within `RemoteMcpSession`, exposing counters and backoff strategies through telemetry hooks. When repeated failures occur, escalate by surfacing a consolidated status banner to the interactive shell and emitting structured events to plugins so downstream observability pipelines can alert maintainers.
+
+## File metadata diffing
+- **Purpose:** Allow operators to compare consecutive `stat` results so that automated workflows can detect drift in permissions, ownership, or size without scraping terminal logs.
+- **Usage:** Persist the most recent metadata snapshot for each inspected path inside the client state store, then extend the `filetool stat` command with an opt-in flag (for example `--diff-previous`) that renders side-by-side changes. The server should expose an efficient metadata checksum to avoid transmitting redundant fields, and plugins could subscribe to metadata change events to trigger alerting or remediation pipelines.

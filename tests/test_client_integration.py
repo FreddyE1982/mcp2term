@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import queue
 import shlex
@@ -647,6 +648,104 @@ def test_manage_file_out_of_range_keeps_session_alive(
                 )
             finally:
                 session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_filetool_stat_reports_metadata(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            state = RemoteShellState(cwd=session.resolve_working_directory())
+            statuses: list[int] = []
+            outputs: list[str] = []
+            errors: list[str] = []
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: outputs.append(message),
+                error_writer=lambda message: errors.append(message),
+            )
+
+            target_dir = "mcp-file-tests"
+            file_name = f"stat-{uuid.uuid4().hex}.txt"
+            relative_path = f"{target_dir}/{file_name}"
+
+            create_status = processor.execute(
+                f"filetool create {relative_path} --content sentinel --create-parents --overwrite"
+            )
+            assert create_status == 0
+            assert statuses and statuses[-1] == 0
+
+            outputs.clear()
+            errors.clear()
+
+            stat_status = processor.execute(f"filetool stat {relative_path}")
+            assert stat_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert any("size_bytes" in entry for entry in outputs)
+            assert any("file_type" in entry for entry in outputs)
+
+            outputs.clear()
+            errors.clear()
+
+            json_status = processor.execute(f"filetool stat {relative_path} --format json")
+            assert json_status == 0
+            assert statuses and statuses[-1] == 0
+            assert not errors
+            assert len(outputs) > 1
+            json_blob = "\n".join(outputs[1:])
+            metadata = json.loads(json_blob)
+            assert metadata["exists"] is True
+            assert metadata["follow_symlinks"] is True
+            assert metadata["file_type"] == "file"
+            assert metadata["size_bytes"] >= len("sentinel")
+        finally:
+            try:
+                session.run_command(
+                    f"rm -rf {shlex.quote(target_dir)}",
+                    working_directory=session.resolve_working_directory(),
+                    environment=None,
+                )
+            finally:
+                session.close()
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_filetool_stat_reports_missing_file(use_real_dependencies: bool) -> None:
+    with running_server() as url:
+        session = RemoteMcpSession(url)
+        session.start()
+        try:
+            state = RemoteShellState(cwd=session.resolve_working_directory())
+            statuses: list[int] = []
+            outputs: list[str] = []
+            errors: list[str] = []
+            processor = RemoteCommandProcessor(
+                session=session,
+                state=state,
+                status_callback=statuses.append,
+                output_writer=lambda message: outputs.append(message),
+                error_writer=lambda message: errors.append(message),
+            )
+
+            missing_name = f"missing-{uuid.uuid4().hex}.txt"
+            missing_path = f"ghost/{missing_name}"
+
+            status = processor.execute(
+                f"filetool stat {missing_path} --no-follow-symlinks"
+            )
+            assert status != 0
+            assert statuses and statuses[-1] != 0
+            assert not outputs
+            assert errors
+            assert any("File not found" in entry for entry in errors)
+            assert any("exists" in entry and "False" in entry for entry in errors)
+            assert any("follow_symlinks" in entry and "False" in entry for entry in errors)
+        finally:
+            session.close()
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])

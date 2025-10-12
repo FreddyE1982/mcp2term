@@ -1017,6 +1017,7 @@ def create_server(
         overwrite: bool = False,
         create_if_missing: bool = True,
         escape_profile: str = "auto",
+        follow_symlinks: bool = True,
         ctx: Context[ServerSession, ApplicationState],
     ) -> dict[str, Any]:
         state = ctx.request_context.lifespan_context
@@ -1032,6 +1033,7 @@ def create_server(
             "create_if_missing": create_if_missing,
             "resolved_path": str(resolved_path),
             "escape_profile": escape_profile,
+            "follow_symlinks": follow_symlinks,
         }
         if content is not None:
             request_arguments["content"] = content
@@ -1156,6 +1158,13 @@ def create_server(
                         path,
                         patch_text=content,
                         encoding=encoding,
+                        escape_profile=escape_profile,
+                    )
+                case "stat":
+                    result = editor.stat_file(
+                        path,
+                        encoding=encoding,
+                        follow_symlinks=follow_symlinks,
                         escape_profile=escape_profile,
                     )
                 case _:
