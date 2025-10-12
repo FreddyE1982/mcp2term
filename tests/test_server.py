@@ -1,7 +1,9 @@
 """Tests for the MCP server factory and plugin exposure."""
 
 import asyncio
+import io
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,7 +16,7 @@ from mcp2term.plugin import (
     PluginRegistry,
     ServerWarningEvent,
 )
-from mcp2term.server import UserChatBridge, create_server
+from mcp2term.server import ConsoleStreamProxy, UserChatBridge, create_server
 
 
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
@@ -50,6 +52,35 @@ class FileOperationRecorder:
 
     async def on_file_operation(self, event: FileOperationEvent) -> None:
         self.events.append(event)
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_console_stream_proxy_buffers_and_flushes(use_real_dependencies: bool) -> None:
+    stream = io.StringIO()
+    lock = threading.RLock()
+    proxy = ConsoleStreamProxy(name="stdout", underlying=stream, lock=lock)
+
+    assert proxy.name == "stdout"
+    proxy.write("alpha")
+    assert stream.getvalue() == "alpha"
+
+    proxy.set_paused(True)
+    proxy.write("beta")
+    proxy.writelines(["-", "gamma", "\n"])
+
+    assert proxy.is_paused()
+    assert stream.getvalue() == "alpha"
+
+    proxy.flush()
+    assert stream.getvalue() == "alpha"
+
+    proxy.set_paused(False)
+    assert not proxy.is_paused()
+    assert stream.getvalue() == "alphabetagamma\n"
+
+    proxy.write("delta")
+    proxy.flush()
+    assert stream.getvalue().endswith("gamma\ndelta")
 
 
 def test_plugin_manager_emits_warning_event() -> None:
