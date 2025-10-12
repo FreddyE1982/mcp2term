@@ -72,3 +72,7 @@
 ## Operator message policy hooks
 - **Purpose:** Enable security and compliance teams to approve, redact, or transform operator-sent messages before they reach clients, ensuring that sensitive guidance does not leak unintentionally.
 - **Usage:** Introduce a plugin hook fired immediately before `_broadcast_message` transmits to sessions. The hook should receive the raw message, the formatted prefix, and contextual metadata such as the timestamp and connected session count. Plugins can veto delivery, substitute content, append audit annotations, or trigger out-of-band notifications when policy rules are violated.
+
+## Operator messaging command-line companion
+- **Purpose:** Provide a non-interactive utility that can inject operator messages into the running server now that the standalone terminal window has been retired.
+- **Usage:** Implement a small CLI entry point (for example `mcp2term-send-message`) that connects to the existing chat bridge transport, authenticates using short-lived tokens, and submits structured messages. The tool should support templated payloads, dry-run validation, and integration with automation systems so supervisors can broadcast scripted status updates without requiring physical access to the server console.

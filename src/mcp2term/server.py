@@ -6,15 +6,12 @@ import io
 import logging
 import os
 import select
-import shlex
-import shutil
 import signal
-import subprocess
 import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,140 +45,6 @@ except ImportError:  # pragma: no cover - handled at runtime for Windows
 
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class TerminalLaunchPlan:
-    """Describe how to start the auxiliary terminal chat interface."""
-
-    command: list[str]
-    track_process: bool = True
-
-
-class SystemTerminalLauncher:
-    """Launch a new terminal window for the interactive chat console.
-
-    The launcher inspects the current operating system and environment to
-    select an appropriate terminal emulator. Operators can override the
-    automatic detection by setting ``MCP2TERM_CHAT_TERMINAL`` to an explicit
-    command. Setting the variable to ``disable`` (or similar synonyms) skips
-    the auxiliary console entirely which mirrors the behaviour of the old
-    PyQt bridge when no display server was available.
-    """
-
-    _DISABLE_VALUES = {"disable", "disabled", "off", "none", "false", "0"}
-
-    def __init__(self, *, environment: Mapping[str, str] | None = None) -> None:
-        env = dict(os.environ if environment is None else environment)
-        self._environment = MappingProxyType(env)
-
-    def prepare_plan(self, script_invocation: Sequence[str], *, title: str) -> TerminalLaunchPlan | None:
-        """Return a launch plan or ``None`` when a terminal cannot be located."""
-
-        override = self._environment.get("MCP2TERM_CHAT_TERMINAL")
-        if override:
-            normalized = override.strip()
-            if normalized.lower() in self._DISABLE_VALUES:
-                return None
-            return TerminalLaunchPlan(command=shlex.split(override) + list(script_invocation))
-
-        if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
-            return self._prepare_linux_plan(script_invocation, title)
-        if sys.platform == "darwin":
-            return self._prepare_macos_plan(script_invocation, title)
-        if os.name == "nt":
-            return self._prepare_windows_plan(script_invocation, title)
-        return None
-
-    def launch(
-        self,
-        plan: TerminalLaunchPlan,
-        *,
-        extra_environment: Mapping[str, str] | None = None,
-    ) -> subprocess.Popen[str] | None:
-        """Execute ``plan`` and return the spawned process when trackable."""
-
-        env = dict(os.environ)
-        if extra_environment is not None:
-            env.update(dict(extra_environment))
-
-        popen_kwargs: dict[str, Any] = {"env": env, "close_fds": True}
-        if os.name == "nt":  # pragma: no cover - platform specific branch
-            creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-            popen_kwargs["creationflags"] = creation_flags
-        else:
-            popen_kwargs["start_new_session"] = True
-
-        try:
-            process = subprocess.Popen(plan.command, **popen_kwargs)
-        except FileNotFoundError:
-            logger.exception("Unable to start chat terminal; command missing: %s", plan.command)
-            return None
-        except Exception:  # pragma: no cover - defensive logging
-            logger.exception("Unexpected error while starting chat terminal: %s", plan.command)
-            return None
-
-        return process if plan.track_process else None
-
-    def terminate(self, process: subprocess.Popen[str] | None) -> None:
-        """Attempt to terminate the terminal process if still active."""
-
-        if process is None:
-            return
-        if process.poll() is not None:
-            return
-        try:
-            process.terminate()
-        except Exception:  # pragma: no cover - terminal already closed
-            logger.debug("Terminal process already terminated during shutdown")
-
-    def _prepare_linux_plan(
-        self,
-        script_invocation: Sequence[str],
-        title: str,
-    ) -> TerminalLaunchPlan | None:
-        invocation = list(script_invocation)
-        candidates = [
-            ("x-terminal-emulator", ["-T", title, "-e"]),
-            ("gnome-terminal", ["--title", title, "--"]),
-            ("konsole", ["--new-tab", "-p", f"tabtitle={title}", "-e"]),
-            ("kitty", ["--title", title]),
-            ("alacritty", ["-t", title, "-e"]),
-            ("wezterm", ["start", "--title", title, "--"]),
-            ("xterm", ["-T", title, "-e"]),
-        ]
-        for executable, args in candidates:
-            if shutil.which(executable):
-                if args and args[-1] == "-e":
-                    command = [executable, *args, *invocation]
-                else:
-                    command = [executable, *args, *invocation]
-                return TerminalLaunchPlan(command=command)
-        return None
-
-    def _prepare_macos_plan(
-        self,
-        script_invocation: Sequence[str],
-        title: str,
-    ) -> TerminalLaunchPlan | None:
-        command = " ".join(shlex.quote(part) for part in script_invocation)
-        osa_lines = [
-            "tell application \"Terminal\" to activate",
-            f"tell application \"Terminal\" to do script \"{command}\"",
-            f"tell application \"Terminal\" to set custom title of front window to \"{title}\"",
-        ]
-        return TerminalLaunchPlan(
-            command=["osascript", *[item for line in osa_lines for item in ("-e", line)]],
-            track_process=False,
-        )
-
-    def _prepare_windows_plan(
-        self,
-        script_invocation: Sequence[str],
-        title: str,
-    ) -> TerminalLaunchPlan | None:
-        command = ["cmd.exe", "/c", "start", f"\"{title}\"", *script_invocation]
-        return TerminalLaunchPlan(command=command, track_process=False)
 
 
 @dataclass(slots=True)
