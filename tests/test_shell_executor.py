@@ -13,6 +13,20 @@ from mcp2term.shell import CommandResult, CommandTimeoutError, ShellCommandExecu
 from mcp2term.streaming import InMemoryStreamRecorder
 
 
+class RecordingContext:
+    """Collect informational messages emitted during command execution."""
+
+    def __init__(self) -> None:
+        self.info_messages: list[str] = []
+        self.error_messages: list[str] = []
+
+    async def info(self, message: str) -> None:
+        self.info_messages.append(message)
+
+    async def error(self, message: str) -> None:
+        self.error_messages.append(message)
+
+
 @pytest.mark.parametrize("use_real_dependencies", [False, True])
 def test_shell_executor_streams_output(use_real_dependencies: bool) -> None:
     config = ServerConfig()
@@ -190,3 +204,23 @@ def test_shell_executor_exports_pythonpath(use_real_dependencies: bool) -> None:
     assert lines, "Expected command to produce PYTHONPATH output"
     pythonpath_value = lines[-1].strip()
     assert pythonpath_value == str(config.launch_directory)
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_shell_executor_emits_progress_notices_for_long_commands(use_real_dependencies: bool) -> None:
+    config = ServerConfig(
+        long_command_notice_delay=0.1,
+        long_command_notice_interval=0.2,
+    )
+    manager = PluginManager()
+    manager.refresh_exports()
+    executor = ShellCommandExecutor(config, manager)
+    context = RecordingContext()
+
+    command = "python -c 'import time; time.sleep(0.65)'"
+    result = asyncio.run(executor.run(command, ctx=context))
+
+    assert result.return_code == 0
+    matching_messages = [message for message in context.info_messages if message == "COMANND STILL PROCESSING. PLEASE WAIT"]
+    assert len(matching_messages) >= 2, "Expected at least two long-running notices to be emitted"
+    assert not context.error_messages

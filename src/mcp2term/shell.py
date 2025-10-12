@@ -9,6 +9,7 @@ import os
 import pty
 import logging
 import signal
+from contextlib import suppress
 from asyncio.subprocess import Process
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +32,8 @@ from .streaming import (
 
 
 logger = logging.getLogger(__name__)
+
+_LONG_RUNNING_NOTICE = "COMANND STILL PROCESSING. PLEASE WAIT"
 
 
 @dataclass(slots=True)
@@ -120,6 +123,12 @@ class _ContextEmitter:
         self._plugin_manager = plugin_manager
         self._request = request
 
+    @property
+    def request(self) -> CommandRequest:
+        """Return the command request associated with this emitter."""
+
+        return self._request
+
     async def emit_stdout(self, text: str) -> None:
         chunk = CommandOutputChunk(request=self._request, timestamp=utcnow(), stream="stdout", data=text)
         if self._ctx is not None:
@@ -131,6 +140,18 @@ class _ContextEmitter:
         if self._ctx is not None:
             await self._ctx.error(text)
         await self._plugin_manager.emit_stderr(chunk)
+
+    async def emit_progress_notice(self, text: str) -> None:
+        """Surface progress notices through the MCP context and server logs."""
+
+        if self._ctx is not None:
+            try:
+                await self._ctx.info(text)
+            except Exception:  # pragma: no cover - defensive logging for unexpected failures
+                logger.exception(
+                    "Failed to forward long-running command notice to context for %s", self._request.command_id
+                )
+        logger.info("Command %s still running: %s", self._request.command_id, text)
 
 
 class ShellCommandExecutor:
@@ -177,6 +198,8 @@ class ShellCommandExecutor:
         stderr_task: asyncio.Task[str] | None = None
         master_fd: int | None = None
         slave_fd: int | None = None
+        command_completed = asyncio.Event()
+        progress_task: asyncio.Task[None] | None = None
         try:
             try:
                 if allocate_pty:
@@ -252,6 +275,15 @@ class ShellCommandExecutor:
                 assert managed is not None
                 self._running_commands[request.command_id] = managed
 
+            progress_task = asyncio.create_task(
+                self._monitor_long_running_command(
+                    emitter,
+                    command_completed,
+                    delay=self.config.long_command_notice_delay,
+                    interval=self.config.long_command_notice_interval,
+                )
+            )
+
             async def wait_process(proc: Process) -> int:
                 if timeout_value is None:
                     return await proc.wait()
@@ -305,6 +337,11 @@ class ShellCommandExecutor:
                 pty_allocated=allocate_pty,
             )
         finally:
+            command_completed.set()
+            if progress_task is not None:
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
             if process is not None:
                 async with self._running_lock:
                     entry = self._running_commands.pop(request.command_id, None)
@@ -366,6 +403,46 @@ class ShellCommandExecutor:
                 read_file.close()
             except OSError:
                 pass
+
+    async def _monitor_long_running_command(
+        self,
+        emitter: _ContextEmitter,
+        completion_event: asyncio.Event,
+        *,
+        delay: float,
+        interval: float,
+    ) -> None:
+        """Emit periodic notices for commands exceeding the configured duration."""
+
+        normalized_delay = max(0.0, float(delay))
+        normalized_interval = max(0.0, float(interval))
+        try:
+            if normalized_delay > 0:
+                try:
+                    await asyncio.wait_for(completion_event.wait(), timeout=normalized_delay)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+            elif completion_event.is_set():
+                return
+
+            while not completion_event.is_set():
+                await emitter.emit_progress_notice(_LONG_RUNNING_NOTICE)
+                if completion_event.is_set():
+                    break
+                if normalized_interval <= 0:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await asyncio.wait_for(completion_event.wait(), timeout=normalized_interval)
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Error while emitting long-running command notices for %s", emitter.request.command_id
+            )
 
     async def send_signal(self, command_id: str, sig: int = signal.SIGINT) -> bool:
         """Send ``sig`` to the running command identified by ``command_id``."""
