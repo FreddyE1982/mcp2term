@@ -4,12 +4,18 @@ import asyncio
 import os
 import shlex
 import sys
+import textwrap
 
 import pytest
 
 from mcp2term.config import ServerConfig
 from mcp2term.plugin import PluginManager, PluginRegistry
-from mcp2term.shell import CommandResult, CommandTimeoutError, ShellCommandExecutor
+from mcp2term.shell import (
+    CommandResult,
+    CommandTimeoutError,
+    ShellCommandExecutor,
+    _LONG_RUNNING_NOTICE,
+)
 from mcp2term.streaming import InMemoryStreamRecorder
 
 
@@ -221,7 +227,9 @@ def test_shell_executor_emits_progress_notices_for_long_commands(use_real_depend
     result = asyncio.run(executor.run(command, ctx=context))
 
     assert result.return_code == 0
-    matching_messages = [message for message in context.info_messages if message == "COMMAND STILL PROCESSING. PLEASE WAIT"]
+    matching_messages = [
+        message for message in context.info_messages if message.strip() == _LONG_RUNNING_NOTICE
+    ]
     assert len(matching_messages) >= 2, "Expected at least two long-running notices to be emitted"
     assert not context.error_messages
 
@@ -249,7 +257,7 @@ def test_long_running_notices_stop_after_completion(use_real_dependencies: bool)
 
         # Wait for the first progress notice to be emitted so we know monitoring started.
         for _ in range(50):
-            if any(message == "COMMAND STILL PROCESSING. PLEASE WAIT" for message in context.info_messages):
+            if any(message.strip() == _LONG_RUNNING_NOTICE for message in context.info_messages):
                 break
             await asyncio.sleep(0.05)
         else:
@@ -266,3 +274,56 @@ def test_long_running_notices_stop_after_completion(use_real_dependencies: bool)
 
     result = asyncio.run(run_and_interrupt())
     assert result.return_code != 0
+
+
+@pytest.mark.parametrize("use_real_dependencies", [False, True])
+def test_long_running_notice_keeps_stdout_streaming(use_real_dependencies: bool) -> None:
+    config = ServerConfig(
+        long_command_notice_delay=0.05,
+        long_command_notice_interval=0.05,
+    )
+    manager = PluginManager()
+    manager.refresh_exports()
+    recorder = InMemoryStreamRecorder()
+    PluginRegistry(manager).register_command_listener(recorder)
+    executor = ShellCommandExecutor(config, manager)
+    context = RecordingContext()
+
+    script = textwrap.dedent(
+        """
+        import sys
+        import time
+
+        for index in range(3):
+            sys.stdout.write(f"line-{index}\\n")
+            sys.stdout.flush()
+            time.sleep(0.2)
+
+        time.sleep(0.2)
+        """
+    )
+    command = "python -u - <<'PY'\n" + script + "PY"
+
+    result = asyncio.run(
+        executor.run(
+            command,
+            ctx=context,
+        )
+    )
+
+    stdout_chunks = [chunk for chunk in recorder.chunks if chunk.stream == "stdout"]
+    assert stdout_chunks, "Expected stdout chunks to be recorded during long-running execution"
+
+    progress_messages = [message for message in context.info_messages if _LONG_RUNNING_NOTICE in message]
+    assert progress_messages, "Expected progress notice to reach the client context"
+    assert all(message.endswith("\n") for message in progress_messages)
+    assert all("line-" not in message for message in progress_messages)
+
+    aggregated_output = "".join(context.info_messages)
+    for index in range(3):
+        assert f"line-{index}" in aggregated_output
+
+    assert result.return_code == 0
+    assert "line-0" in result.stdout
+    assert "line-1" in result.stdout
+    assert "line-2" in result.stdout

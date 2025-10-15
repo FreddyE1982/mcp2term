@@ -126,3 +126,36 @@
   configuration to override the default spinner fragment set or disable filtering.
   Provide plugin hooks so environments that rely on bespoke progress indicators can
   register additional characters or entirely custom suppression logic at runtime.
+
+[Vorschlag]
+Introduce user-configurable newline management policies for streaming contexts so
+operators can decide when synthetic delimiters should be injected for long-running
+command notices and stdout mirrors. This builds on the new separator guarantees and
+lets deployments fine-tune how closely the mirrored output should follow the raw
+process streams.
+
+TODOS:
+[TODO] Extend `_ContextEmitter` with a lightweight policy object describing desired newline behaviour per stream.
+[TODO] Surface the policy through `ServerConfig` with environment variable overrides for quick tuning.
+[TODO] Document recommended configurations for TUI clients, web dashboards, and legacy terminals so operators can pick sensible defaults.
+
+[Vorschlag]
+Add structured progress notice payloads that include elapsed time, most recent output
+excerpt, and optional plugin-provided diagnostics so clients can display rich status
+tiles without parsing plain-text strings. This complements the separation changes by
+leveraging the dedicated notice channel.
+
+TODOS:
+[TODO] Define a dataclass describing the structured progress payload forwarded to MCP contexts and plugins.
+[TODO] Update `_monitor_long_running_command` to populate the payload with elapsed durations and most recent stdout timestamps.
+[TODO] Provide client-side adapters that render the structured payload while retaining backward compatibility with plain-text notices.
+
+[Vorschlag]
+Offer regression tests that simulate diverse stdout interleavings (mixed newline and
+no-newline chunks, PTY output, and stderr bursts) to guarantee the separator logic
+remains stable under future refactors.
+
+TODOS:
+[TODO] Build parametrised tests covering PTY and pipe-based executions with varied chunk boundaries.
+[TODO] Validate that plugin listeners and console echo streams receive unmodified data alongside the formatted context messages.
+[TODO] Integrate the new tests into CI pipelines with timing controls to minimise flakiness.

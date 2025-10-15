@@ -122,6 +122,7 @@ class _ContextEmitter:
         self._ctx = ctx
         self._plugin_manager = plugin_manager
         self._request = request
+        self._info_line_open = False
 
     @property
     def request(self) -> CommandRequest:
@@ -129,10 +130,51 @@ class _ContextEmitter:
 
         return self._request
 
+    async def _deliver_info(
+        self,
+        text: str,
+        *,
+        ensure_separate_line: bool = False,
+        ensure_trailing_newline: bool = False,
+    ) -> None:
+        """Send informational text to the MCP context while preserving line structure.
+
+        Parameters
+        ----------
+        text:
+            The text chunk to forward to the client. Empty strings are ignored.
+        ensure_separate_line:
+            When ``True`` the method ensures ``text`` starts on a fresh line even if the
+            previous message did not terminate with a newline.
+        ensure_trailing_newline:
+            When ``True`` the method appends a newline character when ``text`` does not
+            already end with one. This avoids concatenating status notices with streamed
+            command output.
+
+        Examples
+        --------
+        >>> emitter = _ContextEmitter(ctx, plugin_manager, request)
+        >>> await emitter._deliver_info("partial", ensure_separate_line=False)
+        >>> await emitter._deliver_info("COMMAND STILL PROCESSING. PLEASE WAIT", ensure_separate_line=True, ensure_trailing_newline=True)
+        """
+
+        if not text:
+            return
+
+        message = text
+        if ensure_separate_line and self._info_line_open and not message.startswith("\n"):
+            message = f"\n{message}"
+        if ensure_trailing_newline and not message.endswith("\n"):
+            message = f"{message}\n"
+
+        if self._ctx is not None:
+            await self._ctx.info(message)
+
+        self._info_line_open = not message.endswith("\n")
+
     async def emit_stdout(self, text: str) -> None:
         chunk = CommandOutputChunk(request=self._request, timestamp=utcnow(), stream="stdout", data=text)
-        if self._ctx is not None:
-            await self._ctx.info(text)
+        await self._deliver_info(text)
         await self._plugin_manager.emit_stdout(chunk)
 
     async def emit_stderr(self, text: str) -> None:
@@ -144,13 +186,12 @@ class _ContextEmitter:
     async def emit_progress_notice(self, text: str) -> None:
         """Surface progress notices through the MCP context and server logs."""
 
-        if self._ctx is not None:
-            try:
-                await self._ctx.info(text)
-            except Exception:  # pragma: no cover - defensive logging for unexpected failures
-                logger.exception(
-                    "Failed to forward long-running command notice to context for %s", self._request.command_id
-                )
+        try:
+            await self._deliver_info(text, ensure_separate_line=True, ensure_trailing_newline=True)
+        except Exception:  # pragma: no cover - defensive logging for unexpected failures
+            logger.exception(
+                "Failed to forward long-running command notice to context for %s", self._request.command_id
+            )
         logger.info("Command %s still running: %s", self._request.command_id, text)
 
 
